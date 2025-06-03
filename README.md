@@ -1,6 +1,6 @@
 # Local AI Developer Agent
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) <!-- Replace with your chosen license -->
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) 
 
 Local AI Developer Agent is a tool designed to assist developers by integrating AI capabilities directly into their local development workflow. It helps with tasks like code editing, refactoring, generation, explanation, and more, using a powerful AI model (Google Gemini) as its backbone.
 
@@ -46,7 +46,7 @@ Local AI Developer Agent is a tool designed to assist developers by integrating 
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/your-username/local-ai-developer-agent.git # Replace with your repo URL
+    git clone https://github.com/Abdohurbly/local-ai-developer-agent.git 
     cd local-ai-developer-agent
     ```
 
@@ -161,7 +161,7 @@ Contributions are welcome! We appreciate any help to improve the Local AI Develo
 
 ## 📜 License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details. (You'll need to create a LICENSE file and choose a license, MIT is a common choice).
+This project is licensed under the MIT License. 
 
 ## 🙏 Acknowledgements
 
