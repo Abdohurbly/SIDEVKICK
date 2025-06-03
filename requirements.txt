@@ -1,0 +1,6 @@
+google-generativeai
+pathlib
+fastapi
+uvicorn[standard]
+python-multipart
+# streamlit # Streamlit is no longer used for the primary UI
