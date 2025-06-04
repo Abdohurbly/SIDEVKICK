@@ -10,6 +10,10 @@ import {
   applyAIActions,
   getChatHistory,
   clearChatHistory,
+  getRagSettings,
+  updateRagSettings,
+  reindexProject,
+  getRagStatus,
 } from "./services/api";
 import {
   ProjectStructureNode,
@@ -22,6 +26,8 @@ import {
   DEFAULT_AI_MODEL_ID,
   ViewMode,
   PreviewDevice,
+  RAGSettings,
+  RAGStatus,
 } from "./types";
 
 // MUI Imports
@@ -43,18 +49,30 @@ import {
   Modal,
   ToggleButtonGroup,
   ToggleButton,
+  Menu,
+  MenuItem,
+  Chip,
+  Tooltip,
+  LinearProgress,
+  Paper,
 } from "@mui/material";
 import MenuIcon from "@mui/icons-material/Menu";
 import SettingsIcon from "@mui/icons-material/Settings";
 import Brightness4Icon from "@mui/icons-material/Brightness4";
 import Brightness7Icon from "@mui/icons-material/Brightness7";
-import EditIcon from '@mui/icons-material/Edit';
+import EditIcon from "@mui/icons-material/Edit";
+import RefreshIcon from "@mui/icons-material/Refresh";
+import CheckCircleIcon from "@mui/icons-material/CheckCircle";
+import ErrorIcon from "@mui/icons-material/Error";
+import InfoIcon from "@mui/icons-material/Info";
+// import StorageIcon from "@mui/icons-material/Storage"; // Not directly used, but kept
+import VisibilityIcon from "@mui/icons-material/Visibility"; // For Preview toggle
 
 import { getAppTheme } from "./theme";
 
 import FileExplorer from "./components/FileExplorer";
 import EditorPanel from "./components/EditorPanel";
-import PreviewPanel from "./components/PreviewPanel"; // Import PreviewPanel
+import PreviewPanel from "./components/PreviewPanel";
 import ChatPanel from "./components/ChatPanel";
 import AISuggestionsPanel from "./components/AISuggestionsPanel";
 import SettingsPage from "./pages/SettingsPage";
@@ -62,20 +80,20 @@ import SettingsPage from "./pages/SettingsPage";
 const drawerWidth = 280;
 
 const modalStyle = {
-  position: 'absolute' as 'absolute',
-  top: '50%',
-  left: '50%',
-  transform: 'translate(-50%, -50%)',
-  width: 'clamp(300px, 80vw, 700px)',
-  bgcolor: 'background.paper',
+  position: "absolute" as "absolute",
+  top: "50%",
+  left: "50%",
+  transform: "translate(-50%, -50%)",
+  width: "clamp(300px, 80vw, 700px)",
+  bgcolor: "background.paper",
   border: (theme: any) => `1px solid ${theme.palette.divider}`,
-  borderRadius: 2,
+  borderRadius: 2, // theme.shape.borderRadius * 2
   boxShadow: 24,
   p: { xs: 2, sm: 3, md: 4 },
-  maxHeight: '90vh',
-  overflowY: 'auto',
-  display: 'flex',
-  flexDirection: 'column',
+  maxHeight: "90vh",
+  overflowY: "auto",
+  display: "flex",
+  flexDirection: "column",
 };
 
 function App() {
@@ -98,9 +116,11 @@ function App() {
   const [aiSuggestions, setAiSuggestions] = useState<AIResponseData | null>(
     null
   );
-  const [showSuggestionsModal, setShowSuggestionsModal] = useState<boolean>(false);
+  const [showSuggestionsModal, setShowSuggestionsModal] =
+    useState<boolean>(false);
 
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [loadingMessage, setLoadingMessage] = useState<string>("Loading...");
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [snackbarMessage, setSnackbarMessage] = useState("");
   const [snackbarSeverity, setSnackbarSeverity] = useState<
@@ -116,12 +136,26 @@ function App() {
   });
 
   const [selectedAiModel, setSelectedAiModel] = useState<AIModelId>(() => {
-    const storedModel = localStorage.getItem("selectedAiModel") as AIModelId | null;
-    if (storedModel && availableAiModels.some(model => model.id === storedModel)) {
+    const storedModel = localStorage.getItem(
+      "selectedAiModel"
+    ) as AIModelId | null;
+    if (
+      storedModel &&
+      availableAiModels.some((model) => model.id === storedModel)
+    ) {
       return storedModel;
     }
     return DEFAULT_AI_MODEL_ID;
   });
+
+  // RAG-related states
+  const [ragSettings, setRagSettings] = useState<RAGSettings>({
+    enabled: true,
+    max_tokens: 20000,
+  });
+  const [ragStatus, setRagStatus] = useState<RAGStatus | null>(null);
+  const [isIndexing, setIsIndexing] = useState<boolean>(false);
+  const [lastAiResponseMeta, setLastAiResponseMeta] = useState<any>(null);
 
   const muiTheme = useMemo(() => getAppTheme(themeMode), [themeMode]);
 
@@ -129,10 +163,22 @@ function App() {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   // New states for Editor/Preview toggle
-  const [viewMode, setViewMode] = useState<ViewMode>('editor');
-  const [previewUrl, setPreviewUrl] = useState<string>('http://localhost:8080');
-  const [previewDevice, setPreviewDevice] = useState<PreviewDevice>('desktop');
+  const [viewMode, setViewMode] = useState<ViewMode>("editor");
+  const [previewUrl, setPreviewUrl] = useState<string>("http://localhost:8080");
+  const [previewDevice, setPreviewDevice] = useState<PreviewDevice>("desktop");
 
+  // States for top bar menus
+  const [fileMenuAnchorEl, setFileMenuAnchorEl] = useState<null | HTMLElement>(
+    null
+  );
+  const [editMenuAnchorEl, setEditMenuAnchorEl] = useState<null | HTMLElement>(
+    null
+  );
+  const [sectionMenuAnchorEl, setSectionMenuAnchorEl] =
+    useState<null | HTMLElement>(null);
+  const [goMenuAnchorEl, setGoMenuAnchorEl] = useState<null | HTMLElement>(
+    null
+  );
 
   useEffect(() => {
     localStorage.setItem("themeMode", themeMode);
@@ -178,8 +224,9 @@ function App() {
         return;
       }
       setIsLoading(true);
+      setLoadingMessage("Configuring API...");
       try {
-        const response = await configureApiKey(apiKey, selectedAiModel); // Pass selectedAiModel
+        const response = await configureApiKey(apiKey, selectedAiModel);
         if (showAlert) showSnackbar(response.message, "success");
         setIsApiConfigured(true);
       } catch (err: any) {
@@ -187,13 +234,15 @@ function App() {
         setIsApiConfigured(false);
       }
       setIsLoading(false);
+      setLoadingMessage("Loading...");
     },
-    [apiKey, selectedAiModel, showSnackbar] // Added selectedAiModel to dependencies
+    [apiKey, selectedAiModel, showSnackbar]
   );
 
   const fetchProjectStructure = useCallback(async () => {
     if (!isProjectLoaded) return;
     setIsLoading(true);
+    setLoadingMessage("Loading project structure...");
     try {
       const structure = await getProjectStructure();
       setProjectStructure(structure);
@@ -205,6 +254,7 @@ function App() {
       setProjectStructure(null);
     }
     setIsLoading(false);
+    setLoadingMessage("Loading...");
   }, [isProjectLoaded, showSnackbar]);
 
   const fetchChatHistoryInternal = useCallback(async () => {
@@ -218,6 +268,26 @@ function App() {
         err.message
       );
       setChatMessages([]);
+    }
+  }, [isProjectLoaded]);
+
+  const fetchRagSettings = useCallback(async () => {
+    if (!isProjectLoaded) return;
+    try {
+      const settings = await getRagSettings();
+      setRagSettings(settings);
+    } catch (err: any) {
+      console.warn("Failed to fetch RAG settings:", err.message);
+    }
+  }, [isProjectLoaded]);
+
+  const fetchRagStatus = useCallback(async () => {
+    if (!isProjectLoaded) return;
+    try {
+      const status = await getRagStatus();
+      setRagStatus(status);
+    } catch (err: any) {
+      console.warn("Failed to fetch RAG status:", err.message);
     }
   }, [isProjectLoaded]);
 
@@ -235,6 +305,7 @@ function App() {
         return;
       }
       setIsLoading(true);
+      setLoadingMessage("Loading project...");
       setActionResults(null);
       try {
         const response = await loadProject(projectPath);
@@ -245,15 +316,61 @@ function App() {
         setFileContent("");
         setOriginalFileContent("");
         setAiSuggestions(null);
+
+        setLoadingMessage("Initializing RAG system...");
+        await fetchRagSettings();
+        await fetchRagStatus();
       } catch (err: any) {
         showSnackbar(err.message || "Failed to load project.", "error");
         setIsProjectLoaded(false);
         setProjectStructure(null);
       }
       setIsLoading(false);
+      setLoadingMessage("Loading...");
     },
-    [projectPath, isApiConfigured, showSnackbar]
+    [
+      projectPath,
+      isApiConfigured,
+      showSnackbar,
+      fetchRagSettings,
+      fetchRagStatus,
+    ]
   );
+
+  const handleReindexProject = useCallback(async () => {
+    if (!isProjectLoaded) {
+      showSnackbar("No project loaded to reindex.", "warning");
+      return;
+    }
+    setIsIndexing(true);
+    setLoadingMessage("Reindexing project for RAG...");
+    try {
+      const response = await reindexProject();
+      showSnackbar(
+        `Project reindexed successfully. ${response.chunks_indexed} chunks indexed.`,
+        "success"
+      );
+      await fetchRagStatus();
+    } catch (err: any) {
+      showSnackbar(err.message || "Failed to reindex project.", "error");
+    }
+    setIsIndexing(false);
+    setLoadingMessage("Loading...");
+  }, [isProjectLoaded, showSnackbar, fetchRagStatus]);
+
+  const handleToggleRag = useCallback(async () => {
+    const newSettings = { ...ragSettings, enabled: !ragSettings.enabled };
+    try {
+      await updateRagSettings(newSettings);
+      setRagSettings(newSettings);
+      showSnackbar(
+        `RAG ${newSettings.enabled ? "enabled" : "disabled"}`,
+        "success"
+      );
+    } catch (err: any) {
+      showSnackbar(err.message || "Failed to update RAG settings.", "error");
+    }
+  }, [ragSettings, showSnackbar]);
 
   useEffect(() => {
     if (apiKey && !isApiConfigured) {
@@ -271,8 +388,16 @@ function App() {
     if (isProjectLoaded) {
       fetchProjectStructure();
       fetchChatHistoryInternal();
+      fetchRagSettings();
+      fetchRagStatus();
     }
-  }, [isProjectLoaded, fetchProjectStructure, fetchChatHistoryInternal]);
+  }, [
+    isProjectLoaded,
+    fetchProjectStructure,
+    fetchChatHistoryInternal,
+    fetchRagSettings,
+    fetchRagStatus,
+  ]);
 
   const handleFileSelect = async (filePath: string) => {
     if (hasUnsavedChanges) {
@@ -285,6 +410,7 @@ function App() {
       }
     }
     setIsLoading(true);
+    setLoadingMessage(`Loading ${filePath}...`);
     setActionResults(null);
     try {
       const data = await getFileContent(filePath);
@@ -300,6 +426,7 @@ function App() {
       setOriginalFileContent("");
     }
     setIsLoading(false);
+    setLoadingMessage("Loading...");
   };
 
   const handleSaveFile = async () => {
@@ -308,15 +435,21 @@ function App() {
       return;
     }
     setIsLoading(true);
+    setLoadingMessage("Saving file...");
     setActionResults(null);
     try {
       await saveFile(selectedFile, fileContent);
       showSnackbar("File saved successfully!", "success");
       setOriginalFileContent(fileContent);
+      if (ragSettings.enabled) {
+        setLoadingMessage("Updating RAG index...");
+        await fetchRagStatus();
+      }
     } catch (err: any) {
       showSnackbar(err.message || "Failed to save file.", "error");
     }
     setIsLoading(false);
+    setLoadingMessage("Loading...");
   };
 
   const handleChatSubmit = async () => {
@@ -326,6 +459,11 @@ function App() {
       return;
     }
     setIsLoading(true);
+    setLoadingMessage(
+      ragSettings.enabled
+        ? "Searching relevant context..."
+        : "Processing request..."
+    );
     setActionResults(null);
     const newUserMessage: ChatMessage = { role: "user", content: userInput };
     setChatMessages((prev) => [...prev, newUserMessage]);
@@ -333,7 +471,16 @@ function App() {
     setUserInput("");
 
     try {
-      const aiResponse = await chatWithAI(currentPrompt, selectedFile, selectedAiModel);
+      const aiResponse = await chatWithAI(
+        currentPrompt,
+        selectedFile,
+        selectedAiModel
+      );
+
+      if (aiResponse.context_info) {
+        setLastAiResponseMeta(aiResponse.context_info);
+      }
+
       const newAiMessage: ChatMessage = {
         role: "assistant",
         content: aiResponse,
@@ -350,7 +497,7 @@ function App() {
         )
       ) {
         setAiSuggestions(aiResponse);
-        setShowSuggestionsModal(true); // Open modal when suggestions are available
+        setShowSuggestionsModal(true);
       } else {
         setAiSuggestions(null);
         setShowSuggestionsModal(false);
@@ -370,6 +517,7 @@ function App() {
       setShowSuggestionsModal(false);
     }
     setIsLoading(false);
+    setLoadingMessage("Loading...");
   };
 
   const handleApplyActions = async () => {
@@ -382,6 +530,7 @@ function App() {
       return;
     }
     setIsLoading(true);
+    setLoadingMessage("Applying AI actions...");
     setActionResults(null);
     try {
       const actionsToApply = aiSuggestions.actions.filter(
@@ -398,6 +547,7 @@ function App() {
         setAiSuggestions(null);
         setShowSuggestionsModal(false);
         setIsLoading(false);
+        setLoadingMessage("Loading...");
         return;
       }
 
@@ -407,38 +557,48 @@ function App() {
 
       setAiSuggestions(null);
       setShowSuggestionsModal(false);
-      fetchProjectStructure(); 
-      if (selectedFile) {
-        const editedCurrentFileAction = actionsToApply.find(
-          (a) => a.type === "EDIT_FILE" && a.file_path === selectedFile
-        );
-        if (
-          editedCurrentFileAction &&
-          typeof editedCurrentFileAction.content === "string"
-        ) {
-          setFileContent(editedCurrentFileAction.content);
-          setOriginalFileContent(editedCurrentFileAction.content);
-        }
+      fetchProjectStructure();
+
+      const currentFileEditAction = response.results.find(
+        (result) =>
+          result.type === "EDIT_FILE" &&
+          result.path_info === selectedFile &&
+          result.status === "success" // Assuming "success" is the correct status string from API
+      );
+
+      if (currentFileEditAction) {
+        const updatedContent = await getFileContent(selectedFile!);
+        setFileContent(updatedContent.content);
+        setOriginalFileContent(updatedContent.content);
+      }
+
+      if (ragSettings.enabled) {
+        setLoadingMessage("Updating RAG index...");
+        await fetchRagStatus();
       }
     } catch (err: any) {
       showSnackbar(err.message || "Failed to apply AI actions.", "error");
     }
     setIsLoading(false);
+    setLoadingMessage("Loading...");
   };
 
   const handleClearChat = async () => {
     setIsLoading(true);
+    setLoadingMessage("Clearing chat history...");
     setActionResults(null);
     try {
       await clearChatHistory();
       setChatMessages([]);
       setAiSuggestions(null);
       setShowSuggestionsModal(false);
+      setLastAiResponseMeta(null);
       showSnackbar("Chat history cleared.", "success");
     } catch (err: any) {
       showSnackbar(err.message || "Failed to clear chat history.", "error");
     }
     setIsLoading(false);
+    setLoadingMessage("Loading...");
   };
 
   const handleDrawerToggle = () => {
@@ -454,6 +614,41 @@ function App() {
     }
   };
 
+  const handleMenuOpen =
+    (setter: React.Dispatch<React.SetStateAction<HTMLElement | null>>) =>
+    (event: React.MouseEvent<HTMLElement>) => {
+      setter(event.currentTarget);
+    };
+
+  const handleMenuClose = () => {
+    setFileMenuAnchorEl(null);
+    setEditMenuAnchorEl(null);
+    setSectionMenuAnchorEl(null);
+    setGoMenuAnchorEl(null);
+  };
+
+  // Placeholder for non-File menu items
+  const handleMenuItemClick = (menuName: string) => {
+    showSnackbar(`${menuName} - Coming Soon!`, "info");
+    handleMenuClose();
+  };
+
+  // Specific handlers for File menu items
+  const handleCreateFile = () => {
+    showSnackbar("Create File - Not implemented yet.", "info");
+    handleMenuClose();
+  };
+
+  const handleDeleteFile = () => {
+    if (!selectedFile) {
+      showSnackbar("No file selected to delete.", "warning");
+      handleMenuClose();
+      return;
+    }
+    showSnackbar(`Delete File: ${selectedFile} - Not implemented yet.`, "info");
+    handleMenuClose();
+  };
+
   const drawerContent = (
     <FileExplorer
       projectStructure={projectStructure}
@@ -461,6 +656,104 @@ function App() {
       selectedFilePath={selectedFile}
     />
   );
+
+  const generateAppBarTitle = () => {
+    const appBaseTitle = "Local AI Developer Agent";
+    if (showSettings) {
+      return `Settings — ${appBaseTitle}`;
+    }
+
+    if (isProjectLoaded && projectPath) {
+      const projectName = projectPath.split(/[\/]/).pop() || "Project";
+      if (selectedFile) {
+        const unsavedIndicator = hasUnsavedChanges ? " ●" : "";
+        return `${selectedFile}${unsavedIndicator} — ${projectName} — ${appBaseTitle}`;
+      }
+      return `${projectName} — ${appBaseTitle}`;
+    }
+    return appBaseTitle;
+  };
+
+  const renderRagStatusChip = () => {
+    if (!isProjectLoaded || !ragStatus) return null;
+
+    const isIndexed = ragStatus.indexed && ragStatus.total_chunks > 0;
+    const chipColor = ragSettings.enabled
+      ? isIndexed
+        ? "success"
+        : "warning"
+      : "default";
+    const chipIcon = ragSettings.enabled ? (
+      isIndexed ? (
+        <CheckCircleIcon fontSize="small" />
+      ) : (
+        <ErrorIcon fontSize="small" />
+      )
+    ) : (
+      <InfoIcon fontSize="small" />
+    );
+    const chipLabel = ragSettings.enabled
+      ? isIndexed
+        ? `RAG: ${ragStatus.total_chunks} chunks`
+        : "RAG: Not indexed"
+      : "RAG: Disabled";
+
+    return (
+      <Tooltip
+        title={
+          <Box sx={{ p: 1 }}>
+            <Typography variant="body2" sx={{ fontWeight: "bold" }}>
+              RAG Status
+            </Typography>
+            <Typography variant="caption" display="block">
+              Enabled: {ragSettings.enabled ? "Yes" : "No"}
+            </Typography>
+            <Typography variant="caption" display="block">
+              Indexed: {isIndexed ? "Yes" : "No"}
+            </Typography>
+            {isIndexed && (
+              <Typography variant="caption" display="block">
+                Total chunks: {ragStatus.total_chunks}
+              </Typography>
+            )}
+            {lastAiResponseMeta && (
+              <Box
+                sx={{
+                  mt: 1,
+                  pt: 1,
+                  borderTop: `1px solid ${muiTheme.palette.divider}`,
+                }}
+              >
+                <Typography
+                  variant="caption"
+                  display="block"
+                  sx={{ fontWeight: "bold" }}
+                >
+                  Last query:
+                </Typography>
+                <Typography variant="caption" display="block">
+                  Method: {lastAiResponseMeta.method}
+                </Typography>
+                <Typography variant="caption" display="block">
+                  Chunks used: {lastAiResponseMeta.chunks_used}
+                </Typography>
+              </Box>
+            )}
+          </Box>
+        }
+        arrow
+      >
+        <Chip
+          icon={chipIcon}
+          label={chipLabel}
+          size="small"
+          color={chipColor}
+          onClick={handleToggleRag}
+          sx={{ mr: 1, cursor: "pointer" }}
+        />
+      </Tooltip>
+    );
+  };
 
   return (
     <ThemeProvider theme={muiTheme}>
@@ -470,80 +763,233 @@ function App() {
       >
         <AppBar
           position="fixed"
-          sx={{ zIndex: (theme) => theme.zIndex.drawer + 1 }}
+          elevation={1}
+          sx={{
+            zIndex: (theme) => theme.zIndex.drawer + 1,
+            bgcolor: "background.paper",
+            borderBottom: (theme) => `1px solid ${theme.palette.divider}`,
+            color: "text.primary",
+          }}
         >
-          <Toolbar>
+          <Toolbar variant="dense">
             <IconButton
               color="inherit"
               aria-label="open drawer"
               edge="start"
               onClick={handleDrawerToggle}
-              sx={{ mr: 2, display: { sm: "none" } }}
+              sx={{ mr: { xs: 1, sm: 1.5 }, display: { sm: "none" } }}
             >
               <MenuIcon />
             </IconButton>
+            <Box
+              sx={{
+                display: { xs: "none", sm: "flex" },
+                alignItems: "center",
+                mr: 1,
+              }}
+            >
+              {[
+                {
+                  label: "File",
+                  anchor: fileMenuAnchorEl,
+                  setter: setFileMenuAnchorEl,
+                },
+                {
+                  label: "Edit",
+                  anchor: editMenuAnchorEl,
+                  setter: setEditMenuAnchorEl,
+                },
+                {
+                  label: "Section",
+                  anchor: sectionMenuAnchorEl,
+                  setter: setSectionMenuAnchorEl,
+                },
+                {
+                  label: "Go",
+                  anchor: goMenuAnchorEl,
+                  setter: setGoMenuAnchorEl,
+                },
+              ].map((item) => (
+                <React.Fragment key={item.label}>
+                  <MuiButton
+                    onClick={handleMenuOpen(item.setter)}
+                    sx={{
+                      minWidth: "auto",
+                      padding: (theme) => theme.spacing(0.5, 1.5),
+                      color: "text.secondary",
+                      fontSize: "0.875rem",
+                      textTransform: "none",
+                      "&:hover": {
+                        bgcolor: "action.hover",
+                      },
+                    }}
+                  >
+                    {item.label}
+                  </MuiButton>
+                  <Menu
+                    anchorEl={item.anchor}
+                    open={Boolean(item.anchor)}
+                    onClose={handleMenuClose}
+                    MenuListProps={{ dense: true }}
+                  >
+                    {item.label === "File" ? (
+                      [
+                        <MenuItem key="create-file" onClick={handleCreateFile} sx={{ fontSize: "0.875rem" }}>
+                          Create File
+                        </MenuItem>,
+                        <MenuItem
+                          key="save-file"
+                          onClick={() => {
+                            handleSaveFile();
+                            handleMenuClose();
+                          }}
+                          disabled={!selectedFile || !hasUnsavedChanges}
+                          sx={{ fontSize: "0.875rem" }}
+                        >
+                          Save File
+                        </MenuItem>,
+                        <MenuItem
+                          key="delete-file"
+                          onClick={handleDeleteFile}
+                          disabled={!selectedFile}
+                          sx={{ fontSize: "0.875rem" }}
+                        >
+                          Delete File
+                        </MenuItem>
+                      ]
+                    ) : (
+                      [
+                        <MenuItem key={`${item.label}-coming-soon-1`} onClick={() => handleMenuItemClick(`${item.label} Menu Item 1`)} sx={{ fontSize: "0.875rem" }}>
+                          Coming Soon 1
+                        </MenuItem>,
+                        <MenuItem key={`${item.label}-coming-soon-2`} onClick={() => handleMenuItemClick(`${item.label} Menu Item 2`)} sx={{ fontSize: "0.875rem" }}>
+                          Coming Soon 2
+                        </MenuItem>
+                      ]
+                    )}
+                  </Menu>
+                </React.Fragment>
+              ))}
+            </Box>
             <Typography
-              variant="h6"
+              variant="body2"
               noWrap
               component="div"
-              sx={{ flexGrow: 1 }}
+              sx={{
+                flexGrow: 1,
+                fontWeight: 400,
+                fontSize: { xs: "0.8rem", sm: "0.875rem" },
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                textAlign: "center",
+                color: "text.secondary",
+              }}
+              title={generateAppBarTitle()}
             >
-              Local AI Developer Agent
+              {generateAppBarTitle()}
             </Typography>
-            <IconButton
-              color="inherit"
-              onClick={toggleTheme}
+            {renderRagStatusChip()}
+            {isProjectLoaded && ragSettings.enabled && (
+              <Tooltip title="Reindex project for RAG" arrow>
+                <IconButton
+                  color="inherit"
+                  onClick={handleReindexProject}
+                  disabled={isIndexing}
+                  size="small"
+                  sx={{ mr: 0.5 }}
+                >
+                  {isIndexing ? (
+                    <CircularProgress size={18} color="inherit" />
+                  ) : (
+                    <RefreshIcon fontSize="small" />
+                  )}
+                </IconButton>
+              </Tooltip>
+            )}
+            <Tooltip
               title={
                 themeMode === "light"
                   ? "Switch to Dark Mode"
                   : "Switch to Light Mode"
               }
+              arrow
             >
-              {themeMode === "dark" ? <Brightness7Icon /> : <Brightness4Icon />}
-            </IconButton>
-            <IconButton
-              color="inherit"
-              onClick={() => setShowSettings(!showSettings)}
-              title="Settings"
-            >
-              <SettingsIcon />
-            </IconButton>
+              <IconButton
+                color="inherit"
+                onClick={toggleTheme}
+                size="small"
+                sx={{ mr: 0.5 }}
+              >
+                {themeMode === "dark" ? (
+                  <Brightness7Icon fontSize="small" />
+                ) : (
+                  <Brightness4Icon fontSize="small" />
+                )}
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Settings" arrow>
+              <IconButton
+                color="inherit"
+                onClick={() => setShowSettings(!showSettings)}
+                size="small"
+              >
+                <SettingsIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
           </Toolbar>
+          {isLoading && (
+            <LinearProgress
+              sx={{
+                position: "absolute",
+                bottom: 0,
+                left: 0,
+                right: 0,
+                height: 2,
+              }}
+            />
+          )}
         </AppBar>
 
-        {isLoading && (
+        <Toolbar variant="dense" />
+
+        {isLoading && !showSettings && (
           <Box
             sx={{
               position: "fixed",
-              top: 10,
-              right: 10,
-              zIndex: 1301, // Above modal zIndex (typically 1300)
+              top: (theme) =>
+                `calc(${theme.mixins.toolbar.minHeight}px + ${theme.spacing(
+                  1
+                )})`,
+              right: (theme) => theme.spacing(2),
+              zIndex: 1301,
               display: "flex",
               alignItems: "center",
               bgcolor: "background.paper",
-              p: 1,
+              p: (theme) => theme.spacing(0.5, 1),
               borderRadius: 1,
-              boxShadow: 1,
+              boxShadow: (theme) => theme.shadows[3],
             }}
           >
-            <CircularProgress size={20} />{" "}
-            <Typography variant="caption" sx={{ ml: 1 }}>
-              Loading...
+            <CircularProgress size={16} sx={{ mr: 1 }} />
+            <Typography variant="caption" sx={{ color: "text.secondary" }}>
+              {loadingMessage}
             </Typography>
           </Box>
         )}
 
         <Snackbar
           open={snackbarOpen}
-          autoHideDuration={6000}
+          autoHideDuration={4000}
           onClose={() => setSnackbarOpen(false)}
-          anchorOrigin={{ vertical: "top", horizontal: "center" }}
+          anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
         >
           <MuiAlert
             onClose={() => setSnackbarOpen(false)}
             severity={snackbarSeverity}
             sx={{ width: "100%" }}
             variant="filled"
+            elevation={6}
           >
             {snackbarMessage}
           </MuiAlert>
@@ -553,7 +999,6 @@ function App() {
           open={showSuggestionsModal}
           onClose={() => {
             setShowSuggestionsModal(false);
-            // Do not clear aiSuggestions here, allow panel to manage or apply to clear
           }}
           aria-labelledby="ai-suggestions-modal-title"
           aria-describedby="ai-suggestions-modal-description"
@@ -563,17 +1008,18 @@ function App() {
               <AISuggestionsPanel
                 explanation={aiSuggestions.explanation}
                 aiActions={aiSuggestions.actions}
-                onApplyActions={handleApplyActions} // Will also close modal
+                onApplyActions={handleApplyActions}
                 isLoading={isLoading}
               />
             )}
-            <MuiButton 
+            <MuiButton
               onClick={() => {
                 setShowSuggestionsModal(false);
-                setAiSuggestions(null); // Clear suggestions on explicit dismiss
+                setAiSuggestions(null);
               }}
-              sx={{ mt: 2, alignSelf: 'flex-end' }}
+              sx={{ mt: 2, alignSelf: "flex-end" }}
               variant="outlined"
+              size="small"
             >
               Dismiss
             </MuiButton>
@@ -583,19 +1029,22 @@ function App() {
         <Box
           component="main"
           sx={{
-            display: "flex",
+            display: "flex", // Parent flex container
             flexGrow: 1,
-            pt: "64px",
+            overflow: "hidden",
           }}
         >
           {showSettings ? (
-            <Container maxWidth="md" sx={{ mt: 4, mb: 4 }}>
+            <Container
+              maxWidth="md"
+              sx={{ mt: 4, mb: 4, flexGrow: 1, overflowY: "auto" }}
+            >
               <SettingsPage
                 apiKey={apiKey}
                 setApiKey={setApiKey}
                 projectPath={projectPath}
                 setProjectPath={setProjectPath}
-                onConfigure={handleConfigure} // Pass handleConfigure here
+                onConfigure={handleConfigure}
                 onLoadProject={handleLoadProject}
                 isLoading={isLoading}
                 isApiConfigured={isApiConfigured}
@@ -608,32 +1057,41 @@ function App() {
             </Container>
           ) : isApiConfigured && isProjectLoaded ? (
             <>
-              <Drawer
+              <Drawer // Temporary Mobile Drawer
                 variant="temporary"
                 open={mobileOpen}
                 onClose={handleDrawerToggle}
-                ModalProps={{
-                  keepMounted: true,
-                }}
+                ModalProps={{ keepMounted: true }}
                 sx={{
                   display: { xs: "block", sm: "none" },
                   "& .MuiDrawer-paper": {
                     boxSizing: "border-box",
                     width: drawerWidth,
+                    top: (theme) => `${theme.mixins.toolbar.minHeight}px`,
+                    height: (theme) =>
+                      `calc(100% - ${theme.mixins.toolbar.minHeight}px)`,
+                    borderRight: (theme) =>
+                      `1px solid ${theme.palette.divider}`,
                   },
                 }}
               >
                 {drawerContent}
               </Drawer>
-              <Drawer
+              <Drawer // Permanent Desktop Drawer
                 variant="permanent"
                 sx={{
                   display: { xs: "none", sm: "block" },
+                  width: drawerWidth, // Define width for the Drawer component
+                  flexShrink: 0, // Prevent Drawer from shrinking
                   "& .MuiDrawer-paper": {
                     boxSizing: "border-box",
-                    width: drawerWidth,
-                    position: "relative",
-                    height: "calc(100vh - 64px)",
+                    width: drawerWidth, // Also set width for the paper
+                    top: (theme) => `${theme.mixins.toolbar.minHeight}px`,
+                    height: (theme) =>
+                      `calc(100% - ${theme.mixins.toolbar.minHeight}px)`,
+                    borderRight: (theme) =>
+                      `1px solid ${theme.palette.divider}`,
+                    bgcolor: "background.default",
                   },
                 }}
                 open
@@ -641,45 +1099,78 @@ function App() {
                 {drawerContent}
               </Drawer>
 
-              <Box
-                component="div"
+              <Box // Main Content Area (Editor + Chat)
                 sx={{
-                  flexGrow: 1,
-                  p: 1,
+                  flexGrow: 1, // This Box will take up remaining space
                   display: "flex",
                   flexDirection: { xs: "column", md: "row" },
-                  overflow: "hidden", // Added to contain children
+                  overflow: "hidden",
+                  height: (theme) =>
+                    `calc(100vh - ${theme.mixins.toolbar.minHeight}px)`,
                 }}
               >
-                <Box // Editor Area Box
+                <Box // Editor/Preview Container
                   sx={{
                     flex: 2,
                     display: "flex",
                     flexDirection: "column",
-                    // overflowY: "auto", // Removed for better child scroll management
-                    p: { xs: 1, md: 2 },
-                    minHeight: 0, // Ensure flex child can shrink
+                    p: 1,
+                    minHeight: 0,
+                    overflow: "hidden",
                   }}
                 >
-                  <Box sx={{ mb: 2, display: 'flex', justifyContent: 'center' }}>
+                  <Box
+                    sx={{
+                      mb: 1,
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <Typography
+                      variant="caption"
+                      sx={{ color: "text.secondary", ml: 0.5 }}
+                    >
+                      {selectedFile
+                        ? `Editing: ${selectedFile.split(/[\/]/).pop()}`
+                        : "No file selected"}
+                      {hasUnsavedChanges && (
+                        <Box
+                          component="span"
+                          sx={{ color: "warning.main", ml: 0.5 }}
+                        >
+                          ●
+                        </Box>
+                      )}
+                    </Typography>
                     <ToggleButtonGroup
                       value={viewMode}
                       exclusive
                       onChange={handleViewModeChange}
                       aria-label="View mode"
+                      size="small"
                     >
-                      <ToggleButton value="editor" aria-label="Editor mode">
-                        <EditIcon sx={{ mr: 1 }} />
+                      <ToggleButton
+                        value="editor"
+                        aria-label="Editor mode"
+                        sx={{ px: 1, py: 0.5, fontSize: "0.75rem" }}
+                      >
+                        <EditIcon sx={{ mr: 0.5 }} fontSize="inherit" />
                         Editor
                       </ToggleButton>
-                      <ToggleButton value="preview" aria-label="Preview mode">
-                        <Brightness7Icon sx={{ mr: 1 }} />
+                      <ToggleButton
+                        value="preview"
+                        aria-label="Preview mode"
+                        sx={{ px: 1, py: 0.5, fontSize: "0.75rem" }}
+                      >
+                        <VisibilityIcon sx={{ mr: 0.5 }} fontSize="inherit" />
                         Preview
                       </ToggleButton>
                     </ToggleButtonGroup>
                   </Box>
 
-                  {viewMode === 'editor' ? (
+                  {viewMode === "editor" ? (
                     <>
                       <EditorPanel
                         selectedFile={selectedFile}
@@ -690,55 +1181,128 @@ function App() {
                         hasUnsavedChanges={hasUnsavedChanges}
                         theme={themeMode as AppThemeType}
                       />
-                      {actionResults && (
-                        <Box
+                      {actionResults && actionResults.length > 0 && (
+                        <Paper
+                          variant="outlined"
                           sx={{
-                            mt: 2,
-                            p: 2,
-                            border: "1px solid",
+                            mt: 1,
+                            p: 1,
+                            maxHeight: { xs: 100, sm: 150 },
+                            overflowY: "auto",
                             borderColor: "divider",
-                            borderRadius: 1,
-                            maxHeight: 200, 
-                            overflowY: 'auto'
+                            fontSize: "0.8rem",
                           }}
-                          className="action-results-panel"
                         >
-                          <Typography variant="h6" gutterBottom>
-                            Action Results
+                          <Typography
+                            variant="caption"
+                            display="block"
+                            sx={{
+                              fontWeight: "bold",
+                              mb: 0.5,
+                              color: "text.secondary",
+                            }}
+                          >
+                            Action Results:
                           </Typography>
-                          <ul>
-                            {actionResults.map((result, index) => (
-                              <li
-                                key={index}
-                                className={`action-result ${result.status}`}
-                              >
-                                <Typography variant="body2">
-                                  <strong>{result.type}</strong>{" "}
-                                  {result.path_info || result.command}:{" "}
-                                  {result.status}
-                                  {result.detail && (
-                                    <Typography variant="caption" component="small">
-                                      {" "}
-                                      - {result.detail}
-                                    </Typography>
-                                  )}
-                                  {result.output && (
-                                    <pre style={{ fontSize: '0.8em', margin: '4px 0', padding: '4px', backgroundColor: muiTheme.palette.action.hover, borderRadius: '4px', overflowX: 'auto' }}>
-                                      <strong>Stdout:</strong>{" "}
-                                      {result.output.stdout || "(empty)"}\n
-                                      <strong>Stderr:</strong>{" "}
-                                      {result.output.stderr || "(empty)"} 
-                                    </pre>
-                                  )}
-                                </Typography>
-                              </li>
-                            ))}
+                          <ul style={{ margin: 0, paddingLeft: "18px" }}>
+                            {actionResults.map(
+                              (result: ApplyActionDetail, index) => (
+                                <li key={index}>
+                                  <Typography
+                                    variant="body2"
+                                    sx={{
+                                      fontSize: "0.8rem",
+                                      display: "flex",
+                                      alignItems: "center",
+                                    }}
+                                  >
+                                    {result.status === "success" ? ( // Assuming 'success' from your provided code
+                                      <CheckCircleIcon
+                                        color="success"
+                                        sx={{ fontSize: "1rem", mr: 0.5 }}
+                                      />
+                                    ) : (
+                                      <ErrorIcon
+                                        color="error"
+                                        sx={{ fontSize: "1rem", mr: 0.5 }}
+                                      />
+                                    )}
+                                    <strong>{result.type}</strong>{" "}
+                                    <Tooltip
+                                      title={
+                                        result.path_info || result.command || ""
+                                      }
+                                      arrow
+                                    >
+                                      <Box
+                                        component="span"
+                                        sx={{
+                                          textOverflow: "ellipsis",
+                                          overflow: "hidden",
+                                          whiteSpace: "nowrap",
+                                          maxWidth: "150px",
+                                          mx: 0.5,
+                                        }}
+                                      >
+                                        {result.path_info
+                                          ?.split(/[\/]/)
+                                          .pop() || result.command}
+                                      </Box>
+                                    </Tooltip>
+                                    : {result.status}
+                                    {result.detail && (
+                                      <Tooltip title={result.detail} arrow>
+                                        <InfoIcon
+                                          sx={{
+                                            fontSize: "0.8rem",
+                                            ml: 0.5,
+                                            color: "text.secondary",
+                                            cursor: "help",
+                                          }}
+                                        />
+                                      </Tooltip>
+                                    )}
+                                  </Typography>
+                                  {result.output &&
+                                    (result.output.stdout ||
+                                      result.output.stderr) && (
+                                      <pre
+                                        style={{
+                                          fontSize: "0.7em",
+                                          margin: "2px 0 4px 18px",
+                                          padding: "2px 4px",
+                                          backgroundColor:
+                                            muiTheme.palette.action
+                                              .disabledBackground,
+                                          borderRadius: "4px",
+                                          overflowX: "auto",
+                                          maxHeight: "60px",
+                                        }}
+                                      >
+                                        {result.output.stdout && (
+                                          <>
+                                            <strong>Stdout:</strong>{" "}
+                                            {result.output.stdout}
+                                            <br />
+                                          </>
+                                        )}
+                                        {result.output.stderr && (
+                                          <>
+                                            <strong>Stderr:</strong>{" "}
+                                            {result.output.stderr}
+                                          </>
+                                        )}
+                                      </pre>
+                                    )}
+                                </li>
+                              )
+                            )}
                           </ul>
-                        </Box>
+                        </Paper>
                       )}
                     </>
                   ) : (
-                    <PreviewPanel 
+                    <PreviewPanel
                       previewUrl={previewUrl}
                       setPreviewUrl={setPreviewUrl}
                       previewDevice={previewDevice}
@@ -748,58 +1312,62 @@ function App() {
                   )}
                 </Box>
 
-                <Box // Chat Area Box
+                <Box // Chat Panel Container
                   sx={{
                     flex: 1,
                     display: "flex",
                     flexDirection: "column",
-                    overflow: "hidden", // Keep this for ChatPanel to manage its height
-                    borderLeft: { md: "1px solid" },
+                    overflow: "hidden",
+                    borderLeft: { md: `1px solid ${muiTheme.palette.divider}` },
                     borderColor: { md: "divider" },
-                    p: { xs: 1, md: 2 },
-                    minHeight: 0, // Ensure flex child can shrink
+                    p: 1,
+                    minHeight: 0,
+                    bgcolor: "background.default",
                   }}
                 >
-                  <Box
-                    sx={{
-                      flexGrow: 1,
-                      display: "flex",
-                      flexDirection: "column",
-                      minHeight: 0, 
-                    }}
-                  >
-                    <ChatPanel
-                      chatMessages={chatMessages}
-                      userInput={userInput}
-                      setUserInput={setUserInput}
-                      onChatSubmit={handleChatSubmit}
-                      onClearChat={handleClearChat}
-                      isLoading={isLoading}
-                    />
-                  </Box>
+                  <ChatPanel
+                    chatMessages={chatMessages}
+                    userInput={userInput}
+                    setUserInput={setUserInput}
+                    onChatSubmit={handleChatSubmit}
+                    onClearChat={handleClearChat}
+                    isLoading={isLoading}
+                  />
                 </Box>
               </Box>
             </>
           ) : (
-            <Container maxWidth="sm" sx={{ textAlign: "center", mt: 8 }}>
-              <Typography variant="h5" gutterBottom>
-                {!isApiConfigured
-                  ? "Welcome! Please configure your API Key."
-                  : "Project not loaded. Please load a project."}
-              </Typography>
-              <Typography variant="body1" color="textSecondary" paragraph>
-                {!isApiConfigured
-                  ? "Go to Settings to enter your API Key and enable project features."
-                  : "Go to Settings to specify the path to your project folder."}
-              </Typography>
-              <MuiButton
-                variant="contained"
-                color="primary"
-                onClick={() => setShowSettings(true)}
-                sx={{ mt: 2 }}
+            <Container
+              maxWidth="sm"
+              sx={{ textAlign: "center", mt: 8, flexGrow: 1 }}
+            >
+              <Paper
+                elevation={0}
+                sx={{
+                  p: 4,
+                  border: (theme) => `1px dashed ${theme.palette.divider}`,
+                }}
               >
-                Go to Settings
-              </MuiButton>
+                <Typography variant="h5" component="h1" gutterBottom>
+                  {!isApiConfigured
+                    ? "Welcome! Configure API Key"
+                    : "Project Not Loaded"}
+                </Typography>
+                <Typography variant="body1" color="textSecondary" paragraph>
+                  {!isApiConfigured
+                    ? "To get started, please go to Settings and enter your API Key."
+                    : "Please specify the path to your project folder in Settings to load it."}
+                </Typography>
+                <MuiButton
+                  variant="contained"
+                  color="primary"
+                  onClick={() => setShowSettings(true)}
+                  startIcon={<SettingsIcon />}
+                  sx={{ mt: 2 }}
+                >
+                  Go to Settings
+                </MuiButton>
+              </Paper>
             </Container>
           )}
         </Box>

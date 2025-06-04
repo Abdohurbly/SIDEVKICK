@@ -1,8 +1,9 @@
 import os
 from pathlib import Path
-import logging  # Changed from streamlit
+import logging
 from typing import List, Dict, Any, Optional, Set
 import streamlit as st
+from rag_system import RAGSystem
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO)
@@ -25,6 +26,80 @@ COMMON_IGNORE_FILES: Set[str] = {".DS_Store", "*.pyc", "*.log", "*.swp", "*.swo"
 MAX_PROJECT_CONTEXT_CHARS: int = (
     1000000  # Max characters for all_file_contents to send to AI
 )
+
+# Global RAG system instance
+_rag_systems: Dict[str, RAGSystem] = {}
+
+
+def get_rag_system(project_path: str) -> RAGSystem:
+    """Get or create RAG system for project"""
+    global _rag_systems
+
+    if project_path not in _rag_systems:
+        _rag_systems[project_path] = RAGSystem(project_path)
+        # Index project if not already cached
+        if not _rag_systems[project_path].chunks:
+            logger.info("Indexing project for RAG...")
+            _rag_systems[project_path].index_project()
+
+    return _rag_systems[project_path]
+
+
+def get_rag_context(
+    user_query: str,
+    project_path: str,
+    current_file: Optional[str] = None,
+    max_tokens: int = 20000,
+) -> Dict[str, Any]:
+    """Enhanced RAG-based context that includes full files when needed"""
+    try:
+        rag_system = get_rag_system(project_path)
+
+        # Use the new smart context retrieval
+        context = rag_system.get_relevant_context_smart(
+            user_query, current_file, max_tokens, include_full_files=True
+        )
+
+        # Format for AI agent
+        file_paths = context.get("file_paths", [])
+        all_file_contents = context.get("all_file_contents", {})
+        rag_metadata = context.get("rag_metadata", {})
+
+        # Add instructions for the AI about file handling
+        if rag_metadata.get("full_files"):
+            instructions = "\n[CONTEXT INSTRUCTIONS]\n"
+            instructions += "The following files are provided with FULL CONTENT and can be edited:\n"
+            for file in rag_metadata["full_files"]:
+                instructions += f"- {file}\n"
+            instructions += "\nFiles marked as [PARTIAL CONTEXT] are read-only. "
+            instructions += (
+                "If you need to edit them, ask the user to open the file first.\n"
+            )
+
+            # Prepend instructions to the context
+            if all_file_contents:
+                first_file = list(all_file_contents.keys())[0]
+                all_file_contents = {"_instructions": instructions, **all_file_contents}
+
+        return {
+            "file_paths": file_paths,
+            "all_file_contents": all_file_contents,
+            "rag_metadata": rag_metadata,
+        }
+
+    except Exception as e:
+        logger.error(f"RAG context retrieval failed: {e}")
+        # Fallback to original method
+        return get_all_project_files_context(project_path)
+
+
+def invalidate_rag_cache(project_path: str):
+    """Invalidate RAG cache for project (call when files change)"""
+    global _rag_systems
+
+    if project_path in _rag_systems:
+        _rag_systems[project_path].invalidate_cache()
+        del _rag_systems[project_path]
 
 
 def display_file_tree_sidebar(
@@ -123,6 +198,7 @@ def get_project_structure(
 def get_all_project_files_context(
     project_path_str: str, max_total_chars: int = MAX_PROJECT_CONTEXT_CHARS
 ) -> Dict[str, Any]:
+    """Original method - kept as fallback"""
     project_path = Path(project_path_str).resolve()
     if not project_path.is_dir():
         return {"file_paths": [], "all_file_contents": {}}
@@ -212,6 +288,21 @@ def write_file_content(file_path_str: str, content: str) -> bool:
         path = Path(file_path_str).resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+
+        # Invalidate RAG cache for the project when files are modified
+        project_path = None
+        for parent in path.parents:
+            if (
+                (parent / ".git").exists()
+                or (parent / "requirements.txt").exists()
+                or (parent / "package.json").exists()
+            ):
+                project_path = str(parent)
+                break
+
+        if project_path:
+            invalidate_rag_cache(project_path)
+
         return True
     except Exception as e:
         logger.error(f"Error writing file {file_path_str}: {e}")
