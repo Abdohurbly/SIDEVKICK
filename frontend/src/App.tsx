@@ -28,6 +28,7 @@ import {
   PreviewDevice,
   RAGSettings,
   RAGStatus,
+  AIAction,
 } from "./types";
 
 // MUI Imports
@@ -157,6 +158,13 @@ function App() {
   const [isIndexing, setIsIndexing] = useState<boolean>(false);
   const [lastAiResponseMeta, setLastAiResponseMeta] = useState<any>(null);
 
+  const [autoApplyAiSuggestions, setAutoApplyAiSuggestions] = useState<boolean>(
+    () => {
+      const storedValue = localStorage.getItem("autoApplyAiSuggestions");
+      return storedValue === "true";
+    }
+  );
+
   const muiTheme = useMemo(() => getAppTheme(themeMode), [themeMode]);
 
   const [showSettings, setShowSettings] = useState<boolean>(false);
@@ -179,6 +187,11 @@ function App() {
   const [goMenuAnchorEl, setGoMenuAnchorEl] = useState<null | HTMLElement>(
     null
   );
+  const [helpMenuAnchorEl, setHelpMenuAnchorEl] = useState<null | HTMLElement>(
+    null
+  );
+  const [aboutDevMenuAnchorEl, setAboutDevMenuAnchorEl] =
+    useState<null | HTMLElement>(null);
 
   useEffect(() => {
     localStorage.setItem("themeMode", themeMode);
@@ -188,8 +201,16 @@ function App() {
     localStorage.setItem("selectedAiModel", selectedAiModel);
   }, [selectedAiModel]);
 
+  useEffect(() => {
+    localStorage.setItem(
+      "autoApplyAiSuggestions",
+      String(autoApplyAiSuggestions)
+    );
+  }, [autoApplyAiSuggestions]);
+
   const toggleTheme = () => {
     setThemeMode((prevMode) => (prevMode === "light" ? "dark" : "light"));
+    setAboutDevMenuAnchorEl(null);
   };
 
   const hasUnsavedChanges: boolean =
@@ -387,17 +408,24 @@ function App() {
   useEffect(() => {
     if (isProjectLoaded) {
       fetchProjectStructure();
-      fetchChatHistoryInternal();
       fetchRagSettings();
       fetchRagStatus();
     }
   }, [
     isProjectLoaded,
     fetchProjectStructure,
-    fetchChatHistoryInternal,
     fetchRagSettings,
     fetchRagStatus,
   ]);
+
+  // New useEffect specifically for fetching chat history when a project is loaded
+  useEffect(() => {
+    if (isProjectLoaded) {
+      fetchChatHistoryInternal();
+    }
+    // Note: We don't need to explicitly clear chatMessages if isProjectLoaded becomes false,
+    // because handleLoadProject (which sets isProjectLoaded) already clears chatMessages.
+  }, [isProjectLoaded, fetchChatHistoryInternal]);
 
   const handleFileSelect = async (filePath: string) => {
     if (hasUnsavedChanges) {
@@ -486,18 +514,26 @@ function App() {
         content: aiResponse,
       };
       setChatMessages((prev) => [...prev, newAiMessage]);
-      if (
+
+      const hasActionableItems =
         aiResponse.actions &&
         aiResponse.actions.some(
           (a) =>
-            !["GENERAL_MESSAGE"].includes(a.type) ||
+            a.type !== "GENERAL_MESSAGE" ||
             (a.type === "GENERAL_MESSAGE" &&
               a.message &&
               a.message !== aiResponse.explanation)
-        )
-      ) {
-        setAiSuggestions(aiResponse);
-        setShowSuggestionsModal(true);
+        );
+
+      if (hasActionableItems) {
+        setAiSuggestions(aiResponse); // Store suggestions for potential review or if auto-apply fails
+        if (autoApplyAiSuggestions) {
+          showSnackbar("Auto-applying AI suggestions...", "info");
+          await handleApplyActions(aiResponse.actions); // Pass actions directly
+          setShowSuggestionsModal(false); // Ensure modal is closed
+        } else {
+          setShowSuggestionsModal(true); // Show modal for manual application
+        }
       } else {
         setAiSuggestions(null);
         setShowSuggestionsModal(false);
@@ -520,23 +556,31 @@ function App() {
     setLoadingMessage("Loading...");
   };
 
-  const handleApplyActions = async () => {
-    if (
-      !aiSuggestions ||
-      !aiSuggestions.actions ||
-      aiSuggestions.actions.length === 0
-    ) {
+  const handleApplyActions = async (actionsOverride?: AIAction[]) => {
+    const actionsToProcess =
+      actionsOverride || (aiSuggestions ? aiSuggestions.actions : null);
+    const explanationToUse = aiSuggestions
+      ? aiSuggestions.explanation
+      : actionsOverride
+      ? "AI actions auto-applied."
+      : "AI actions applied.";
+
+    if (!actionsToProcess || actionsToProcess.length === 0) {
       showSnackbar("No AI actions to apply.", "warning");
       return;
     }
+
     setIsLoading(true);
     setLoadingMessage("Applying AI actions...");
     setActionResults(null);
+
     try {
-      const actionsToApply = aiSuggestions.actions.filter(
+      const actionsToApply = actionsToProcess.filter(
         (action) =>
           action.type !== "GENERAL_MESSAGE" ||
-          (action.message && action.message !== aiSuggestions.explanation)
+          (action.type === "GENERAL_MESSAGE" &&
+            action.message &&
+            action.message !== explanationToUse)
       );
 
       if (actionsToApply.length === 0) {
@@ -544,43 +588,62 @@ function App() {
           "No actionable changes to apply from AI suggestions.",
           "info"
         );
-        setAiSuggestions(null);
-        setShowSuggestionsModal(false);
-        setIsLoading(false);
-        setLoadingMessage("Loading...");
+        if (!actionsOverride) {
+          // Only clear modal/state if not auto-applying (i.e., called from modal)
+          setAiSuggestions(null);
+          setShowSuggestionsModal(false);
+        }
+        setIsLoading(false); // ensure loading is stopped
+        setLoadingMessage("Loading..."); // reset message
         return;
       }
 
       const response = await applyAIActions(actionsToApply);
       setActionResults(response.results);
-      showSnackbar("AI actions processed. Review results if any.", "success");
+      showSnackbar("AI actions processed. Review results.", "success");
 
-      setAiSuggestions(null);
-      setShowSuggestionsModal(false);
+      if (!actionsOverride) {
+        // If called from modal
+        setAiSuggestions(null);
+        setShowSuggestionsModal(false);
+      }
+
       fetchProjectStructure();
 
-      const currentFileEditAction = response.results.find(
+      const currentFileEditResult = response.results.find(
         (result) =>
-          result.type === "EDIT_FILE" &&
+          (result.type === "EDIT_FILE_COMPLETE" ||
+            result.type === "EDIT_FILE_PARTIAL" ||
+            result.type === "EDIT_FILE") &&
           result.path_info === selectedFile &&
-          result.status === "success" // Assuming "success" is the correct status string from API
+          result.status === "success"
       );
 
-      if (currentFileEditAction) {
-        const updatedContent = await getFileContent(selectedFile!);
-        setFileContent(updatedContent.content);
-        setOriginalFileContent(updatedContent.content);
+      if (currentFileEditResult && selectedFile) {
+        const updatedContentData = await getFileContent(selectedFile);
+        setFileContent(updatedContentData.content);
+        setOriginalFileContent(updatedContentData.content);
       }
 
       if (ragSettings.enabled) {
-        setLoadingMessage("Updating RAG index...");
+        setLoadingMessage("Updating RAG index after applying actions...");
         await fetchRagStatus();
       }
     } catch (err: any) {
-      showSnackbar(err.message || "Failed to apply AI actions.", "error");
+      const errorMessage = err.message || "Failed to apply AI actions.";
+      showSnackbar(errorMessage, "error");
+      setActionResults([
+        {
+          // Provide feedback on error
+          type: "GENERAL_ERROR", // Custom type for UI
+          status: "error",
+          detail: errorMessage,
+        },
+      ]);
+    } finally {
+      setIsLoading(false);
+      setLoadingMessage("Loading...");
     }
-    setIsLoading(false);
-    setLoadingMessage("Loading...");
   };
 
   const handleClearChat = async () => {
@@ -625,6 +688,7 @@ function App() {
     setEditMenuAnchorEl(null);
     setSectionMenuAnchorEl(null);
     setGoMenuAnchorEl(null);
+    setHelpMenuAnchorEl(null);
   };
 
   // Placeholder for non-File menu items
@@ -814,12 +878,17 @@ function App() {
                   anchor: goMenuAnchorEl,
                   setter: setGoMenuAnchorEl,
                 },
+                {
+                  label: "Help",
+                  anchor: helpMenuAnchorEl,
+                  setter: setHelpMenuAnchorEl,
+                },
+               
               ].map((item) => (
                 <React.Fragment key={item.label}>
                   <MuiButton
                     onClick={handleMenuOpen(item.setter)}
                     sx={{
-                      minWidth: "auto",
                       padding: (theme) => theme.spacing(0.5, 1.5),
                       color: "text.secondary",
                       fontSize: "0.875rem",
@@ -876,7 +945,8 @@ function App() {
                             Open Terminal
                           </MenuItem>,
                         ]
-                      : [ // For "Edit", "Section"
+                      : [
+                          // For "Edit", "Section", "Help"
                           <MenuItem
                             key={`${item.label}-coming-soon-1`}
                             onClick={() =>
@@ -1081,6 +1151,8 @@ function App() {
                 selectedAiModel={selectedAiModel}
                 setSelectedAiModel={setSelectedAiModel}
                 availableAiModels={availableAiModels}
+                autoApplyAiSuggestions={autoApplyAiSuggestions}
+                setAutoApplyAiSuggestions={setAutoApplyAiSuggestions}
                 onClose={() => setShowSettings(false)}
               />
             </Container>

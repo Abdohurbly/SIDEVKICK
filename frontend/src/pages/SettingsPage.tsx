@@ -62,6 +62,8 @@ interface SettingsPageProps {
   selectedAiModel: AIModelId;
   setSelectedAiModel: (modelId: AIModelId) => void;
   availableAiModels: AIModelInfo[];
+  autoApplyAiSuggestions: boolean;
+  setAutoApplyAiSuggestions: (enabled: boolean) => void;
   onClose: () => void;
 }
 
@@ -77,6 +79,8 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
   isProjectLoaded,
   selectedAiModel,
   setSelectedAiModel,
+  autoApplyAiSuggestions,
+  setAutoApplyAiSuggestions,
   onClose,
 }) => {
   const [ragSettings, setRagSettings] = useState<RAGSettings>({
@@ -392,6 +396,29 @@ const SettingsPage: React.FC<SettingsPageProps> = ({
             >
               Load Project
             </Button>
+          </AccordionDetails>
+        </Accordion>
+
+
+        {/* General App Settings */}
+        <Accordion>
+          <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+            <Typography variant="h6">General Preferences</Typography>
+          </AccordionSummary>
+          <AccordionDetails>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={autoApplyAiSuggestions}
+                  onChange={(e) => setAutoApplyAiSuggestions(e.target.checked)}
+                  disabled={isLoading}
+                />
+              }
+              label="Automatically apply AI recommendations"
+            />
+            <Typography variant="caption" display="block" color="text.secondary" sx={{mt:0.5}}>
+              When enabled, AI-suggested code changes will be applied directly without requiring manual confirmation from the suggestions panel.
+            </Typography>
           </AccordionDetails>
         </Accordion>
 
