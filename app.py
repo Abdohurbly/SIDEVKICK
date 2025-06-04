@@ -4,6 +4,7 @@ import difflib
 import json
 from typing import Any, Dict, Optional
 import subprocess  # Added for shell command execution
+from diff_utils import DiffProcessor, create_change_preview
 
 import utils
 from agent import GeminiAgent
@@ -266,7 +267,14 @@ with col_editor:
             a
             for a in ai_response_data.get("actions", [])
             if a["type"]
-            in ["EDIT_FILE", "CREATE_FILE", "CREATE_FOLDER", "EXECUTE_SHELL_COMMAND"]
+            in [
+                "EDIT_FILE",
+                "EDIT_FILE_COMPLETE",
+                "EDIT_FILE_PARTIAL",
+                "CREATE_FILE",
+                "CREATE_FOLDER",
+                "EXECUTE_SHELL_COMMAND",
+            ]
         ]
 
         if not actionable_items:
@@ -281,8 +289,10 @@ with col_editor:
         for idx, action in enumerate(ai_response_data.get("actions", [])):
             action_key_prefix = f"action_{idx}_{action.get('file_path', action.get('folder_path', action.get('command', 'general')))}"
 
-            if action["type"] == "EDIT_FILE":
-                with st.expander(f"✏️ Edit: `{action['file_path']}`", expanded=True):
+            if action["type"] == "EDIT_FILE_COMPLETE":
+                with st.expander(
+                    f"✏️ Edit Complete: `{action['file_path']}`", expanded=True
+                ):
                     target_file_abs = (
                         Path(st.session_state.project_path) / action["file_path"]
                     ).resolve()
@@ -291,7 +301,102 @@ with col_editor:
                         original_content = target_file_abs.read_text(
                             encoding="utf-8", errors="ignore"
                         )
-                    else:  # File might be newly created by a previous action in same batch
+                    else:
+                        original_content = (
+                            "[File does not exist yet or is new in this set of actions]"
+                        )
+
+                    proposed_content = action["content"]
+                    diff = list(
+                        difflib.unified_diff(
+                            original_content.splitlines(keepends=True),
+                            proposed_content.splitlines(keepends=True),
+                            fromfile=f"a/{action['file_path']}",
+                            tofile=f"b/{action['file_path']}",
+                            lineterm="",
+                        )
+                    )
+                    if diff:
+                        st.code("".join(diff), language="diff")
+                    else:
+                        st.markdown(
+                            "_No textual changes, or this is the proposed content for a new/empty file._"
+                        )
+                        st.code(
+                            proposed_content,
+                            language=Path(action["file_path"]).suffix[1:].lower()
+                            or "plaintext",
+                        )
+
+            elif action["type"] == "EDIT_FILE_PARTIAL":
+                with st.expander(
+                    f"📝 Edit Partial: `{action['file_path']}`", expanded=True
+                ):
+                    target_file_abs = (
+                        Path(st.session_state.project_path) / action["file_path"]
+                    ).resolve()
+
+                    if not target_file_abs.exists():
+                        st.error(
+                            f"Cannot apply partial edit: file {action['file_path']} does not exist"
+                        )
+                        continue
+
+                    original_content = target_file_abs.read_text(
+                        encoding="utf-8", errors="ignore"
+                    )
+                    changes = action.get("changes", [])
+
+                    # Validate changes
+                    valid, error_msg = DiffProcessor.validate_changes(
+                        original_content, changes
+                    )
+                    if not valid:
+                        st.error(f"Invalid changes: {error_msg}")
+                        continue
+
+                    # Show preview of changes
+                    preview = create_change_preview(
+                        original_content, changes, action["file_path"]
+                    )
+                    st.markdown("**Changes to apply:**")
+                    st.text(preview)
+
+                    # Generate the modified content for diff display
+                    try:
+                        modified_content = DiffProcessor.apply_partial_changes(
+                            original_content, changes
+                        )
+
+                        # Show unified diff
+                        unified_diff = DiffProcessor.generate_unified_diff(
+                            original_content,
+                            modified_content,
+                            f"a/{action['file_path']}",
+                            f"b/{action['file_path']}",
+                        )
+
+                        if unified_diff:
+                            st.code(unified_diff, language="diff")
+                        else:
+                            st.markdown("_No changes detected._")
+
+                    except Exception as e:
+                        st.error(f"Error processing changes: {e}")
+
+            elif action["type"] == "EDIT_FILE":  # Legacy support
+                with st.expander(
+                    f"✏️ Edit (Legacy): `{action['file_path']}`", expanded=True
+                ):
+                    target_file_abs = (
+                        Path(st.session_state.project_path) / action["file_path"]
+                    ).resolve()
+                    original_content = ""
+                    if target_file_abs.exists():
+                        original_content = target_file_abs.read_text(
+                            encoding="utf-8", errors="ignore"
+                        )
+                    else:
                         original_content = (
                             "[File does not exist yet or is new in this set of actions]"
                         )
@@ -397,7 +502,10 @@ with col_editor:
                             }
                         )
 
-                elif action_item["type"] == "EDIT_FILE":
+                elif (
+                    action_item["type"] == "EDIT_FILE_COMPLETE"
+                    or action_item["type"] == "EDIT_FILE"
+                ):
                     file_path = action_item.get("file_path")
                     content = action_item.get("content")
                     if file_path and content is not None:
@@ -409,7 +517,7 @@ with col_editor:
                             application_errors_for_ai_feedback.append(
                                 {
                                     "type": "FILE_OPERATION_ERROR",
-                                    "operation": "EDIT_FILE",
+                                    "operation": "EDIT_FILE_COMPLETE",
                                     "path": file_path,
                                     "error": "Failed to write content.",
                                 }
@@ -420,7 +528,9 @@ with col_editor:
                             st.session_state.current_file_content = content
                             st.session_state.unsaved_changes = False
                     else:
-                        st.warning("EDIT_FILE action missing 'file_path' or 'content'.")
+                        st.warning(
+                            "EDIT_FILE_COMPLETE action missing 'file_path' or 'content'."
+                        )
                         err_detail = []
                         if not file_path:
                             err_detail.append("Missing 'file_path'")
@@ -429,8 +539,106 @@ with col_editor:
                         application_errors_for_ai_feedback.append(
                             {
                                 "type": "MALFORMED_ACTION",
-                                "action_type": "EDIT_FILE",
+                                "action_type": "EDIT_FILE_COMPLETE",
                                 "error": ", ".join(err_detail),
+                            }
+                        )
+
+                elif action_item["type"] == "EDIT_FILE_PARTIAL":
+                    file_path = action_item.get("file_path")
+                    changes = action_item.get("changes", [])
+
+                    if file_path and changes:
+                        file_to_edit_abs = (project_root_abs_path / file_path).resolve()
+
+                        if not file_to_edit_abs.exists():
+                            applied_all_successfully = False
+                            err_msg = f"Cannot apply partial edit: file {file_path} does not exist"
+                            st.error(err_msg)
+                            application_errors_for_ai_feedback.append(
+                                {
+                                    "type": "FILE_OPERATION_ERROR",
+                                    "operation": "EDIT_FILE_PARTIAL",
+                                    "path": file_path,
+                                    "error": "File does not exist.",
+                                }
+                            )
+                            continue
+
+                        try:
+                            # Read original content
+                            original_content = file_to_edit_abs.read_text(
+                                encoding="utf-8", errors="ignore"
+                            )
+
+                            # Validate changes
+                            valid, error_msg = DiffProcessor.validate_changes(
+                                original_content, changes
+                            )
+                            if not valid:
+                                applied_all_successfully = False
+                                st.error(
+                                    f"Invalid changes for {file_path}: {error_msg}"
+                                )
+                                application_errors_for_ai_feedback.append(
+                                    {
+                                        "type": "FILE_OPERATION_ERROR",
+                                        "operation": "EDIT_FILE_PARTIAL",
+                                        "path": file_path,
+                                        "error": f"Invalid changes: {error_msg}",
+                                    }
+                                )
+                                continue
+
+                            # Apply changes
+                            modified_content = DiffProcessor.apply_partial_changes(
+                                original_content, changes
+                            )
+
+                            # Write the modified content
+                            if not utils.write_file_content(
+                                str(file_to_edit_abs), modified_content
+                            ):
+                                applied_all_successfully = False
+                                err_msg = f"Failed to write partial changes to file: {file_path}"
+                                st.error(err_msg)
+                                application_errors_for_ai_feedback.append(
+                                    {
+                                        "type": "FILE_OPERATION_ERROR",
+                                        "operation": "EDIT_FILE_PARTIAL",
+                                        "path": file_path,
+                                        "error": "Failed to write content.",
+                                    }
+                                )
+                            elif (
+                                str(file_to_edit_abs)
+                                == st.session_state.selected_file_path
+                            ):
+                                # Update the current file content in session if it's the selected file
+                                st.session_state.current_file_content = modified_content
+                                st.session_state.unsaved_changes = False
+
+                        except Exception as e:
+                            applied_all_successfully = False
+                            err_msg = f"Error applying partial changes to {file_path}: {str(e)}"
+                            st.error(err_msg)
+                            application_errors_for_ai_feedback.append(
+                                {
+                                    "type": "FILE_OPERATION_ERROR",
+                                    "operation": "EDIT_FILE_PARTIAL",
+                                    "path": file_path,
+                                    "error": str(e),
+                                }
+                            )
+                    else:
+                        st.warning(
+                            "EDIT_FILE_PARTIAL action missing 'file_path' or 'changes'."
+                        )
+                        application_errors_for_ai_feedback.append(
+                            {
+                                "type": "MALFORMED_ACTION",
+                                "action_type": "EDIT_FILE_PARTIAL",
+                                "error": "Missing 'file_path' or 'changes'",
                             }
                         )
 
@@ -715,14 +923,19 @@ with col_chat:
                     st.markdown(content["explanation"])
                     action_summary_parts = []
                     for action_data in content.get("actions", []):
-                        if action_data["type"] == "EDIT_FILE":
+                        if (
+                            action_data["type"] == "EDIT_FILE"
+                            or action_data["type"] == "EDIT_FILE_COMPLETE"
+                        ):
                             action_summary_parts.append(
                                 f"Edited `{action_data.get('file_path','N/A')}`"
                             )
-                        elif action_data["type"] == "CREATE_FILE":
+                        elif action_data["type"] == "EDIT_FILE_PARTIAL":
+                            changes_count = len(action_data.get("changes", []))
                             action_summary_parts.append(
-                                f"Created `{action_data.get('file_path','N/A')}`"
+                                f"Partially edited `{action_data.get('file_path','N/A')}` ({changes_count} changes)"
                             )
+
                         elif action_data["type"] == "CREATE_FOLDER":
                             action_summary_parts.append(
                                 f"Created folder `{action_data.get('folder_path','N/A')}`"
@@ -782,17 +995,26 @@ with col_chat:
                     else None
                 )
 
+                enhanced_context = utils.get_context_with_editing_hints(
+                    project_path=st.session_state.project_path,
+                    use_rag=False,  # In this Streamlit app, we're not using RAG by default
+                    current_file=relative_current_file_path,
+                    user_query=user_prompt,
+                )
+
         ai_context = {
-            "file_paths": st.session_state.project_files_context.get("file_paths", []),
+            "file_paths": enhanced_context.get("file_paths", []),
             "current_file_path": relative_current_file_path,
             "current_file_content": (
                 st.session_state.current_file_content
                 if st.session_state.selected_file_path
                 else None
             ),
-            "all_file_contents": st.session_state.project_files_context.get(
-                "all_file_contents", {}
+            "all_file_contents": enhanced_context.get("all_file_contents", {}),
+            "editing_recommendation": enhanced_context.get(
+                "editing_recommendation", ""
             ),
+            "large_files": enhanced_context.get("large_files", []),
         }
 
         agent: GeminiAgent = st.session_state.agent
@@ -807,7 +1029,14 @@ with col_chat:
 
         if any(
             action["type"]
-            in ["EDIT_FILE", "CREATE_FILE", "CREATE_FOLDER", "EXECUTE_SHELL_COMMAND"]
+            in [
+                "EDIT_FILE",
+                "EDIT_FILE_COMPLETE",
+                "EDIT_FILE_PARTIAL",
+                "CREATE_FILE",
+                "CREATE_FOLDER",
+                "EXECUTE_SHELL_COMMAND",
+            ]
             for action in ai_response_data.get("actions", [])
         ):
             st.session_state.ai_actions_to_apply = ai_response_data

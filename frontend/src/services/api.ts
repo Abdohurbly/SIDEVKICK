@@ -31,7 +31,7 @@ const apiClient = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
-  
+
 });
 
 // Enhanced error handling interceptor
@@ -74,6 +74,16 @@ export const configureApiKey = async (
 
   const response = await apiClient.post<ApiKeyConfigResponse>('/config/api-key', payload);
   return response.data;
+};
+
+export const getFileContentForDiff = async (relativePath: string): Promise<string> => {
+  try {
+    const response = await getFileContent(relativePath);
+    return response.content;
+  } catch (error) {
+    console.warn(`Could not fetch content for ${relativePath}:`, error);
+    return "";
+  }
 };
 
 // Project Management

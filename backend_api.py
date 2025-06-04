@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional, Union
 import subprocess
 from pathlib import Path
 import logging
+from diff_utils import DiffProcessor, ContextualDiffProcessor
 
 from agent import (
     GeminiAgent,
@@ -76,6 +77,7 @@ class AIAction(BaseModel):
     command: Optional[str] = None
     description: Optional[str] = None
     message: Optional[str] = None
+    changes: Optional[List[Dict[str, Any]]] = None  # For partial edits
 
 
 class AIResponse(BaseModel):
@@ -334,16 +336,26 @@ async def chat_with_ai(request: ChatRequest):
                 max_tokens=20000,
             )
             context_method = "RAG"
+            # Add editing recommendation for RAG
+            project_files_context["editing_recommendation"] = (
+                "Use EDIT_FILE_COMPLETE - you have targeted chunks"
+            )
         except Exception as e:
             logger.error(f"RAG failed, falling back to traditional method: {e}")
-            project_files_context = utils.get_all_project_files_context(
-                current_project_path
+            project_files_context = utils.get_context_with_editing_hints(
+                project_path=current_project_path,
+                use_rag=False,
+                current_file=request.current_open_file_relative_path,
+                user_query=request.user_prompt,
             )
             context_method = "Traditional (RAG fallback)"
     else:
-        logger.info("Using traditional context retrieval...")
-        project_files_context = utils.get_all_project_files_context(
-            current_project_path
+        logger.info("Using traditional context retrieval with editing hints...")
+        project_files_context = utils.get_context_with_editing_hints(
+            project_path=current_project_path,
+            use_rag=False,
+            current_file=request.current_open_file_relative_path,
+            user_query=request.user_prompt,
         )
         context_method = "Traditional"
 
@@ -363,6 +375,10 @@ async def chat_with_ai(request: ChatRequest):
         "all_file_contents": project_files_context.get("all_file_contents", {}),
         "context_method": context_method,
         "rag_metadata": project_files_context.get("rag_metadata", {}),
+        "editing_recommendation": project_files_context.get(
+            "editing_recommendation", ""
+        ),
+        "large_files": project_files_context.get("large_files", []),
     }
 
     chat_history.append({"role": "user", "content": request.user_prompt})
@@ -412,7 +428,7 @@ async def apply_ai_actions(request: ApplyActionsRequest):
                     {"type": action_type, "path_info": folder_path, "status": "success"}
                 )
 
-            elif action_type == "EDIT_FILE":
+            elif action_type == "EDIT_FILE_COMPLETE" or action_type == "EDIT_FILE":
                 file_path = action_item.get("file_path")
                 content = action_item.get("content")
                 if not file_path or content is None:
@@ -422,6 +438,50 @@ async def apply_ai_actions(request: ApplyActionsRequest):
                     raise Exception(f"Failed to edit file: {file_path}")
                 results.append(
                     {"type": action_type, "path_info": file_path, "status": "success"}
+                )
+
+            elif action_type == "EDIT_FILE_PARTIAL":
+                file_path = action_item.get("file_path")
+                changes = action_item.get("changes", [])
+
+                if not file_path or not changes:
+                    raise ValueError("file_path or changes missing")
+
+                file_to_edit_abs = (project_root_abs_path / file_path).resolve()
+
+                if not file_to_edit_abs.exists():
+                    raise Exception(f"File does not exist: {file_path}")
+
+                # Read original content
+                original_content = file_to_edit_abs.read_text(
+                    encoding="utf-8", errors="ignore"
+                )
+
+                # Validate and apply changes
+                valid, error_msg = DiffProcessor.validate_changes(
+                    original_content, changes
+                )
+                if not valid:
+                    raise Exception(f"Invalid changes: {error_msg}")
+
+                modified_content = DiffProcessor.apply_partial_changes(
+                    original_content, changes
+                )
+
+                if not utils.write_file_content(
+                    str(file_to_edit_abs), modified_content
+                ):
+                    raise Exception(
+                        f"Failed to write partial changes to file: {file_path}"
+                    )
+
+                results.append(
+                    {
+                        "type": action_type,
+                        "path_info": file_path,
+                        "status": "success",
+                        "changes_applied": len(changes),
+                    }
                 )
 
             elif action_type == "CREATE_FILE":
@@ -438,6 +498,123 @@ async def apply_ai_actions(request: ApplyActionsRequest):
                     raise Exception(f"Failed to create file: {file_path}")
                 results.append(
                     {"type": action_type, "path_info": file_path, "status": "success"}
+                )
+
+            elif action_type == "EDIT_FILE_CONTEXTUAL":
+                file_path = action_item.get("file_path")
+
+                if not file_path:
+                    raise ValueError("file_path is required for contextual edit")
+
+                file_to_edit_abs = (project_root_abs_path / file_path).resolve()
+
+                if not file_to_edit_abs.exists():
+                    raise Exception(f"File does not exist: {file_path}")
+
+                # Read original content
+                original_content = file_to_edit_abs.read_text(
+                    encoding="utf-8", errors="ignore"
+                )
+
+                logger.info(f"Applying contextual edit to {file_path}")
+
+                # Create a single change from the action
+                contextual_change = {
+                    "operation": action_item.get("operation"),
+                    "target_content": action_item.get("target_content"),
+                    "replacement_content": action_item.get("replacement_content"),
+                    "anchor_content": action_item.get("anchor_content"),
+                    "before_context": action_item.get("before_context"),
+                    "after_context": action_item.get("after_context"),
+                    "content": action_item.get("content"),  # For insert operations
+                }
+
+                # Validate the contextual change
+                valid, error_msg = ContextualDiffProcessor.validate_contextual_changes(
+                    original_content, [contextual_change]
+                )
+                if not valid:
+                    logger.error(f"Contextual validation failed: {error_msg}")
+                    raise Exception(f"Invalid contextual change: {error_msg}")
+
+                try:
+                    modified_content = ContextualDiffProcessor.apply_contextual_changes(
+                        original_content, [contextual_change]
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to apply contextual change: {e}")
+                    raise Exception(f"Failed to apply contextual change: {str(e)}")
+
+                if not utils.write_file_content(
+                    str(file_to_edit_abs), modified_content
+                ):
+                    raise Exception(
+                        f"Failed to write contextual changes to file: {file_path}"
+                    )
+
+                results.append(
+                    {
+                        "type": action_type,
+                        "path_info": file_path,
+                        "status": "success",
+                        "operation": action_item.get("operation"),
+                    }
+                )
+
+            # Also add support for multiple contextual changes in one action
+            elif action_type == "EDIT_FILE_CONTEXTUAL_BATCH":
+                file_path = action_item.get("file_path")
+                contextual_changes = action_item.get("changes", [])
+
+                if not file_path or not contextual_changes:
+                    raise ValueError(
+                        "file_path and changes are required for contextual batch edit"
+                    )
+
+                file_to_edit_abs = (project_root_abs_path / file_path).resolve()
+
+                if not file_to_edit_abs.exists():
+                    raise Exception(f"File does not exist: {file_path}")
+
+                # Read original content
+                original_content = file_to_edit_abs.read_text(
+                    encoding="utf-8", errors="ignore"
+                )
+
+                logger.info(
+                    f"Applying {len(contextual_changes)} contextual changes to {file_path}"
+                )
+
+                # Validate all contextual changes
+                valid, error_msg = ContextualDiffProcessor.validate_contextual_changes(
+                    original_content, contextual_changes
+                )
+                if not valid:
+                    logger.error(f"Contextual validation failed: {error_msg}")
+                    raise Exception(f"Invalid contextual changes: {error_msg}")
+
+                try:
+                    modified_content = ContextualDiffProcessor.apply_contextual_changes(
+                        original_content, contextual_changes
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to apply contextual changes: {e}")
+                    raise Exception(f"Failed to apply contextual changes: {str(e)}")
+
+                if not utils.write_file_content(
+                    str(file_to_edit_abs), modified_content
+                ):
+                    raise Exception(
+                        f"Failed to write contextual changes to file: {file_path}"
+                    )
+
+                results.append(
+                    {
+                        "type": action_type,
+                        "path_info": file_path,
+                        "status": "success",
+                        "changes_applied": len(contextual_changes),
+                    }
                 )
 
             elif action_type == "EXECUTE_SHELL_COMMAND":

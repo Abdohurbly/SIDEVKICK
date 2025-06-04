@@ -490,7 +490,7 @@ function App() {
         aiResponse.actions &&
         aiResponse.actions.some(
           (a) =>
-            a.type !== "GENERAL_MESSAGE" ||
+            !["GENERAL_MESSAGE"].includes(a.type) ||
             (a.type === "GENERAL_MESSAGE" &&
               a.message &&
               a.message !== aiResponse.explanation)
@@ -505,7 +505,7 @@ function App() {
     } catch (err: any) {
       showSnackbar(err.message || "Failed to get AI response.", "error");
       const errorAiMessageContent: AIResponseData = {
-        explanation: `Error: ${err.message || "Failed to get AI response."}`, 
+        explanation: `Error: ${err.message || "Failed to get AI response."}`,
         actions: [],
       };
       const errorAiMessage: ChatMessage = {
@@ -630,6 +630,11 @@ function App() {
   // Placeholder for non-File menu items
   const handleMenuItemClick = (menuName: string) => {
     showSnackbar(`${menuName} - Coming Soon!`, "info");
+    handleMenuClose();
+  };
+
+  const handleOpenTerminalClick = () => {
+    showSnackbar("Open Terminal - Feature coming soon!", "info");
     handleMenuClose();
   };
 
@@ -832,41 +837,65 @@ function App() {
                     onClose={handleMenuClose}
                     MenuListProps={{ dense: true }}
                   >
-                    {item.label === "File" ? (
-                      [
-                        <MenuItem key="create-file" onClick={handleCreateFile} sx={{ fontSize: "0.875rem" }}>
-                          Create File
-                        </MenuItem>,
-                        <MenuItem
-                          key="save-file"
-                          onClick={() => {
-                            handleSaveFile();
-                            handleMenuClose();
-                          }}
-                          disabled={!selectedFile || !hasUnsavedChanges}
-                          sx={{ fontSize: "0.875rem" }}
-                        >
-                          Save File
-                        </MenuItem>,
-                        <MenuItem
-                          key="delete-file"
-                          onClick={handleDeleteFile}
-                          disabled={!selectedFile}
-                          sx={{ fontSize: "0.875rem" }}
-                        >
-                          Delete File
-                        </MenuItem>
-                      ]
-                    ) : (
-                      [
-                        <MenuItem key={`${item.label}-coming-soon-1`} onClick={() => handleMenuItemClick(`${item.label} Menu Item 1`)} sx={{ fontSize: "0.875rem" }}>
-                          Coming Soon 1
-                        </MenuItem>,
-                        <MenuItem key={`${item.label}-coming-soon-2`} onClick={() => handleMenuItemClick(`${item.label} Menu Item 2`)} sx={{ fontSize: "0.875rem" }}>
-                          Coming Soon 2
-                        </MenuItem>
-                      ]
-                    )}
+                    {item.label === "File"
+                      ? [
+                          <MenuItem
+                            key="create-file"
+                            onClick={handleCreateFile}
+                            sx={{ fontSize: "0.875rem" }}
+                          >
+                            Create File
+                          </MenuItem>,
+                          <MenuItem
+                            key="save-file"
+                            onClick={() => {
+                              handleSaveFile();
+                              handleMenuClose();
+                            }}
+                            disabled={!selectedFile || !hasUnsavedChanges}
+                            sx={{ fontSize: "0.875rem" }}
+                          >
+                            Save File
+                          </MenuItem>,
+                          <MenuItem
+                            key="delete-file"
+                            onClick={handleDeleteFile}
+                            disabled={!selectedFile}
+                            sx={{ fontSize: "0.875rem" }}
+                          >
+                            Delete File
+                          </MenuItem>,
+                        ]
+                      : item.label === "Go"
+                      ? [
+                          <MenuItem
+                            key="go-open-terminal"
+                            onClick={handleOpenTerminalClick}
+                            sx={{ fontSize: "0.875rem" }}
+                          >
+                            Open Terminal
+                          </MenuItem>,
+                        ]
+                      : [ // For "Edit", "Section"
+                          <MenuItem
+                            key={`${item.label}-coming-soon-1`}
+                            onClick={() =>
+                              handleMenuItemClick(`${item.label} Menu Item 1`)
+                            }
+                            sx={{ fontSize: "0.875rem" }}
+                          >
+                            Coming Soon 1
+                          </MenuItem>,
+                          <MenuItem
+                            key={`${item.label}-coming-soon-2`}
+                            onClick={() =>
+                              handleMenuItemClick(`${item.label} Menu Item 2`)
+                            }
+                            sx={{ fontSize: "0.875rem" }}
+                          >
+                            Coming Soon 2
+                          </MenuItem>,
+                        ]}
                   </Menu>
                 </React.Fragment>
               ))}
@@ -1216,7 +1245,7 @@ function App() {
                                       alignItems: "center",
                                     }}
                                   >
-                                    {result.status === "success" ? ( // Assuming 'success' from your provided code
+                                    {result.status === "success" ? (
                                       <CheckCircleIcon
                                         color="success"
                                         sx={{ fontSize: "1rem", mr: 0.5 }}
@@ -1227,7 +1256,13 @@ function App() {
                                         sx={{ fontSize: "1rem", mr: 0.5 }}
                                       />
                                     )}
-                                    <strong>{result.type}</strong>{" "}
+                                    <strong>
+                                      {result.type === "EDIT_FILE_COMPLETE"
+                                        ? "Edit Complete"
+                                        : result.type === "EDIT_FILE_PARTIAL"
+                                        ? "Edit Partial"
+                                        : result.type}
+                                    </strong>{" "}
                                     <Tooltip
                                       title={
                                         result.path_info || result.command || ""
@@ -1262,6 +1297,21 @@ function App() {
                                         />
                                       </Tooltip>
                                     )}
+                                    {/* Show additional info for partial edits */}
+                                    {result.type === "EDIT_FILE_PARTIAL" &&
+                                      (result as any).changes_applied && (
+                                        <Chip
+                                          size="small"
+                                          label={`${
+                                            (result as any).changes_applied
+                                          } changes`}
+                                          sx={{
+                                            ml: 0.5,
+                                            height: 16,
+                                            fontSize: "0.7rem",
+                                          }}
+                                        />
+                                      )}
                                   </Typography>
                                   {result.output &&
                                     (result.output.stdout ||

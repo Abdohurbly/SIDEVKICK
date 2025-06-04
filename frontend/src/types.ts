@@ -275,7 +275,17 @@ export interface AIAction {
   command?: string;
   description?: string;
   message?: string;
+  changes?: PartialEditChange[]; // New field for partial edits
 }
+
+export interface PartialEditChange {
+  operation: 'replace' | 'insert' | 'delete';
+  start_line?: number;
+  end_line?: number;
+  line?: number;
+  content?: string;
+}
+
 
 export interface AIResponseData {
   explanation: string;

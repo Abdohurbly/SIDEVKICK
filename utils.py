@@ -309,6 +309,41 @@ def write_file_content(file_path_str: str, content: str) -> bool:
         return False
 
 
+def get_context_with_editing_hints(
+    project_path: str,
+    use_rag: bool = True,
+    current_file: Optional[str] = None,
+    user_query: str = "",
+) -> Dict[str, Any]:
+    """Get project context with hints about which editing method to use"""
+
+    if use_rag:
+        context = get_rag_context(user_query, project_path, current_file)
+        context["editing_recommendation"] = (
+            "Use EDIT_FILE_COMPLETE - you have targeted chunks"
+        )
+    else:
+        context = get_all_project_files_context(project_path)
+
+        # Analyze file sizes to recommend editing strategy
+        large_files = []
+        for file_path, content in context.get("all_file_contents", {}).items():
+            if len(content) > 10000:  # Files larger than 10k chars
+                large_files.append(file_path)
+
+        if large_files:
+            context["editing_recommendation"] = (
+                f"Consider using EDIT_FILE_PARTIAL for large files: {', '.join(large_files[:3])}"
+            )
+            context["large_files"] = large_files
+        else:
+            context["editing_recommendation"] = (
+                "Use EDIT_FILE_COMPLETE - files are reasonably sized"
+            )
+
+    return context
+
+
 def create_folder_if_not_exists(folder_path_str: str) -> bool:
     try:
         Path(folder_path_str).resolve().mkdir(parents=True, exist_ok=True)

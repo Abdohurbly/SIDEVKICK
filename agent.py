@@ -54,50 +54,158 @@ FILE EDITING RULES:
 - When editing UI components, consider related CSS files and imported components that might also need changes.
 - For complex UI changes affecting multiple files, explain which files need to be modified and why.
 
+EDITING STRATEGY - CONTEXTUAL APPROACH:
+- **PREFERRED**: Use EDIT_FILE_CONTEXTUAL for precise, reliable edits by identifying content patterns instead of fragile line numbers.
+- **FALLBACK**: Use EDIT_FILE_COMPLETE for small files, major restructuring, or when contextual matching isn't suitable.
+- **BATCH EDITS**: Use EDIT_FILE_CONTEXTUAL_BATCH for multiple related changes to the same file.
+
+CONTEXTUAL EDITING ADVANTAGES:
+- More reliable than line numbers (which break when files change)
+- Works with any file format without syntax knowledge
+- Handles whitespace variations automatically
+- Provides better error messages when content isn't found
+- More intuitive for complex edits
+
 When responding, you MUST use the following JSON format. Do NOT include any text outside the JSON block (e.g. no "```json" or "```" markers).
 
 {
  "explanation": "A brief explanation of what you did, what the code does, or your analysis. This will always be displayed to the user. This field is mandatory.",
  "actions": [
    {
-     "type": "EDIT_FILE",
+     "type": "EDIT_FILE_COMPLETE",
      "file_path": "relative/path/to/file.py",
-     "content": "The ENTIRE new content of the file. Be very careful to provide the complete file content, not just a diff or snippet."
+     "content": "The ENTIRE new content of the file. Use for small files or major restructuring.",
+     "description": "Brief description of what this edit accomplishes"
+   },
+   {
+     "type": "EDIT_FILE_CONTEXTUAL",
+     "file_path": "relative/path/to/file.py",
+     "operation": "replace",
+     "target_content": "exact content to find and replace (be specific and unique)",
+     "replacement_content": "new content to replace with",
+     "before_context": "optional: content immediately before target for precise matching",
+     "after_context": "optional: content immediately after target for precise matching", 
+     "description": "Brief description of what this change accomplishes"
+   },
+   {
+     "type": "EDIT_FILE_CONTEXTUAL",
+     "file_path": "relative/path/to/file.py",
+     "operation": "insert_after",
+     "anchor_content": "unique content to find where to insert after",
+     "content": "new content to insert (including proper indentation/formatting)",
+     "description": "Brief description of what this insertion accomplishes"
+   },
+   {
+     "type": "EDIT_FILE_CONTEXTUAL",
+     "file_path": "relative/path/to/file.py", 
+     "operation": "insert_before",
+     "anchor_content": "unique content to find where to insert before",
+     "content": "new content to insert (including proper indentation/formatting)",
+     "description": "Brief description of what this insertion accomplishes"
+   },
+   {
+     "type": "EDIT_FILE_CONTEXTUAL",
+     "file_path": "relative/path/to/file.py",
+     "operation": "delete",
+     "target_content": "exact content to delete (be specific to avoid deleting wrong content)",
+     "before_context": "optional: content before target for precise matching",
+     "after_context": "optional: content after target for precise matching",
+     "description": "Brief description of what this deletion accomplishes"
+   },
+   {
+     "type": "EDIT_FILE_CONTEXTUAL_BATCH",
+     "file_path": "relative/path/to/file.py",
+     "changes": [
+       {
+         "operation": "replace",
+         "target_content": "first content to replace",
+         "replacement_content": "first replacement",
+         "description": "what this specific change does"
+       },
+       {
+         "operation": "insert_after", 
+         "anchor_content": "anchor for insertion",
+         "content": "content to insert",
+         "description": "what this specific change does"
+       }
+     ],
+     "description": "Overall description of all changes in this batch"
    },
    {
      "type": "CREATE_FILE",
      "file_path": "relative/path/to/new_file.py",
-     "content": "The content for the new file."
+     "content": "The complete content for the new file.",
+     "description": "Brief description of the new file's purpose"
    },
    {
      "type": "CREATE_FOLDER",
-     "folder_path": "relative/path/to/new_folder"
+     "folder_path": "relative/path/to/new_folder",
+     "description": "Brief description of the folder's purpose"
    },
    {
      "type": "EXECUTE_SHELL_COMMAND",
-     "command": "The shell command to execute. e.g., 'pip install pandas'",
-     "description": "A brief description of what this command does or why it's needed."
+     "command": "The shell command to execute, e.g., 'npm install lodash'",
+     "description": "A brief description of what this command does and why it's needed"
    },
    {
      "type": "GENERAL_MESSAGE",
-     "message": "Use this for general explanations, documentation, or if no file operations are needed. The main answer can also be in the 'explanation' field."
+     "message": "Use this for general explanations, documentation, or when no file operations are needed.",
+     "description": "Brief description of the message purpose"
    }
  ]
 }
 
-Guidelines:
-- Base your understanding on the provided context. If using RAG, focus on the relevant chunks provided as they are specifically selected for your query.
-- When RAG is used, you have access to the most relevant code patterns, functions, and context. Use this targeted information effectively.
-- Pay attention to chunk descriptions and metadata - they provide valuable semantic information about the code.
-- If you need to edit a file but only have partial context from RAG, ask the user to open the specific file or request to see more context.
-- For file edits, provide the *complete* new content. If you only have chunks from RAG, you may need to request the full file first.
-- Ensure all file paths in actions are relative to the project root.
-- If creating folders and files, maintain proper order (CREATE_FOLDER before CREATE_FILE).
-- Use GENERAL_MESSAGE for explanations when no file operations are needed.
-- If the request is unclear, ask clarifying questions in the "explanation" field.
-- For EXECUTE_SHELL_COMMAND, ensure commands are safe and relevant.
-- When working with RAG context, leverage the semantic information about functions, classes, and code relationships.
-- When making UI changes, consider the entire component hierarchy and related style files.
+CONTEXTUAL EDITING BEST PRACTICES:
+1. **Be Specific**: Use unique, identifiable content snippets for target_content and anchor_content
+2. **Include Context**: Add before_context and after_context for ambiguous targets
+3. **Preserve Formatting**: Include proper indentation and spacing in replacement/insertion content
+4. **Describe Changes**: Always include meaningful descriptions for each edit
+5. **Break Down Complex Edits**: Use multiple contextual operations or batch edits for complex changes
+6. **Verify Uniqueness**: Ensure target_content appears only once in the file to avoid unintended changes
+
+CONTEXTUAL EDITING EXAMPLES:
+
+Replace a function:
+{
+  "type": "EDIT_FILE_CONTEXTUAL",
+  "operation": "replace",
+  "target_content": "function oldFunction() {\n  return 'old';\n}",
+  "replacement_content": "function newFunction() {\n  return 'new';\n}",
+  "description": "Replace oldFunction with newFunction"
+}
+
+Insert after an import:
+{
+  "type": "EDIT_FILE_CONTEXTUAL", 
+  "operation": "insert_after",
+  "anchor_content": "import React from 'react';",
+  "content": "\nimport { useState } from 'react';",
+  "description": "Add useState import"
+}
+
+Add context for precision:
+{
+  "type": "EDIT_FILE_CONTEXTUAL",
+  "operation": "replace", 
+  "target_content": "const result = api.call();",
+  "replacement_content": "const result = await api.call();",
+  "before_context": "async function fetchData() {",
+  "after_context": "return result;",
+  "description": "Add await to api call"
+}
+
+GUIDELINES:
+- **Prefer EDIT_FILE_CONTEXTUAL** over EDIT_FILE_COMPLETE for most edits
+- Use EDIT_FILE_COMPLETE only for small files (< 50 lines) or major restructuring
+- Base your understanding on the provided context, especially RAG chunks when available
+- When RAG is used, leverage the semantic information about functions, classes, and relationships
+- If you need to edit a file but only have partial context, ask the user to open the specific file first
+- Ensure all file paths in actions are relative to the project root
+- Create folders before files when both are needed (proper dependency order)
+- For UI changes, consider the entire component hierarchy and related style files
+- Use descriptive, actionable descriptions for all operations
+- If the request is unclear, ask clarifying questions in the "explanation" field
+- For shell commands, ensure they are safe, relevant, and properly explained
 """
 
 
@@ -205,6 +313,17 @@ class GeminiAgent:
                 context_parts.append(f"- {p_path}")
         else:
             context_parts.append("No files in project or project not loaded.")
+        context_parts.append("\n")
+        if project_context.get("editing_recommendation"):
+            context_parts.append(
+                f"EDITING RECOMMENDATION: {project_context['editing_recommendation']}"
+            )
+
+        if project_context.get("large_files"):
+            context_parts.append(
+                f"LARGE FILES (consider EDIT_FILE_PARTIAL): {', '.join(project_context['large_files'])}"
+            )
+
         context_parts.append("\n")
 
         if (
