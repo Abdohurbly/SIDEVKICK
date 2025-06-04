@@ -3,6 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Local AI Developer Agent is a tool designed to assist developers by integrating AI capabilities directly into their local development workflow. It helps with tasks like code editing, refactoring, generation, explanation, and more, using a powerful AI model (Google Gemini) as its backbone.
+
 ![UI Screenshot](docs/images/1.png)
 ![UI Screenshot](docs/images/2.png)
 ![UI Screenshot](docs/images/3.png)
@@ -46,24 +47,23 @@ This agent currently supports multiple providers and their latest models:
 
 > ✅ You can switch models dynamically from the configuration panel.
 
-## 🔍 Smart Context Search (RAG) vs Traditional Mode
+## 🔍 Smart Context System (RAG vs Smart Static Analysis)
 
-The agent supports two methods for understanding your codebase:
+The agent supports two powerful methods to understand your codebase context:
 
-### ✅ RAG (Retrieval-Augmented Generation) – "Smart Context Search"
+### ✅ Smart Retrieval (RAG – Retrieval-Augmented Generation)
 
-* Uses embeddings and a semantic index (via FAISS + SentenceTransformers) to retrieve **only the most relevant code chunks** related to your query.
-* Improves speed and accuracy by eliminating unrelated code.
-* Enables smart UI linking, file dependencies, and context-aware suggestions.
-* Great for large projects where full context is too heavy or noisy.
+* Uses embeddings and a semantic vector index (FAISS + SentenceTransformers) to retrieve **only the most relevant code chunks** for your query.
+* Helps avoid noisy context and focuses the model on precise logic.
+* Enables file-level dependency understanding, class/function metadata, and component detection.
 
-### ❌ Traditional Mode
+### 🔬 Smart Static Context (without RAG)
 
-* Sends **entire file contents** (up to a max token limit).
-* Less intelligent, more prone to irrelevant outputs.
-* Still useful for smaller projects or when RAG is disabled.
+* Even when RAG is disabled, the agent performs **intelligent static analysis** to determine relevant files and context.
+* It detects UI components, code complexity, function/class declarations, and structural relationships across files.
+* This hybrid approach ensures that context sent to the model is focused and high-quality — even in full-project scans.
 
-> You can enable/disable RAG through the API or UI settings. Internally, the backend uses metadata like chunk type, description, and file path to enrich the retrieval process.
+> You can toggle RAG on/off via UI or API. Both methods work intelligently behind the scenes using semantic metadata, not just raw file dumps.
 
 ## 🛠️ Tech Stack
 
@@ -223,6 +223,7 @@ Contributions are welcome! We appreciate any help to improve the Local AI Develo
 * Please use the GitHub Issues section of this repository to report bugs or request new features.
 * Before creating a new issue, check if a similar one already exists.
 * For bug reports, please provide as much detail as possible, including steps to reproduce, environment details, and logs if relevant.
+
 
 ### Code Style
 
