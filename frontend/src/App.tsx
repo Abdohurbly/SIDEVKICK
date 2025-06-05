@@ -557,15 +557,29 @@ function App() {
   };
 
   const handleApplyActions = async (actionsOverride?: AIAction[]) => {
-    const actionsToProcess =
-      actionsOverride || (aiSuggestions ? aiSuggestions.actions : null);
+    // Ensure we have a valid array of actions
+    let actionsToProcess: AIAction[] = [];
+
+    if (Array.isArray(actionsOverride)) {
+      actionsToProcess = actionsOverride;
+    } else if (aiSuggestions && Array.isArray(aiSuggestions.actions)) {
+      actionsToProcess = aiSuggestions.actions;
+    } else {
+      console.error("Invalid actions data:", {
+        actionsOverride,
+        aiSuggestions,
+      });
+      showSnackbar("Invalid AI actions format. Cannot apply changes.", "error");
+      return;
+    }
+
     const explanationToUse = aiSuggestions
       ? aiSuggestions.explanation
       : actionsOverride
       ? "AI actions auto-applied."
       : "AI actions applied.";
 
-    if (!actionsToProcess || actionsToProcess.length === 0) {
+    if (actionsToProcess.length === 0) {
       showSnackbar("No AI actions to apply.", "warning");
       return;
     }
@@ -589,12 +603,11 @@ function App() {
           "info"
         );
         if (!actionsOverride) {
-          // Only clear modal/state if not auto-applying (i.e., called from modal)
           setAiSuggestions(null);
           setShowSuggestionsModal(false);
         }
-        setIsLoading(false); // ensure loading is stopped
-        setLoadingMessage("Loading..."); // reset message
+        setIsLoading(false);
+        setLoadingMessage("Loading...");
         return;
       }
 
@@ -603,7 +616,6 @@ function App() {
       showSnackbar("AI actions processed. Review results.", "success");
 
       if (!actionsOverride) {
-        // If called from modal
         setAiSuggestions(null);
         setShowSuggestionsModal(false);
       }
@@ -634,9 +646,8 @@ function App() {
       showSnackbar(errorMessage, "error");
       setActionResults([
         {
-          // Provide feedback on error
-          type: "GENERAL_ERROR", // Custom type for UI
-          status: "error",
+          type: "GENERAL_ERROR" as any,
+          status: "error" as any,
           detail: errorMessage,
         },
       ]);
@@ -645,7 +656,6 @@ function App() {
       setLoadingMessage("Loading...");
     }
   };
-
   const handleClearChat = async () => {
     setIsLoading(true);
     setLoadingMessage("Clearing chat history...");
@@ -883,7 +893,6 @@ function App() {
                   anchor: helpMenuAnchorEl,
                   setter: setHelpMenuAnchorEl,
                 },
-               
               ].map((item) => (
                 <React.Fragment key={item.label}>
                   <MuiButton
@@ -1106,7 +1115,11 @@ function App() {
             {aiSuggestions && (
               <AISuggestionsPanel
                 explanation={aiSuggestions.explanation}
-                aiActions={aiSuggestions.actions}
+                aiActions={
+                  Array.isArray(aiSuggestions.actions)
+                    ? aiSuggestions.actions
+                    : []
+                }
                 onApplyActions={handleApplyActions}
                 isLoading={isLoading}
               />

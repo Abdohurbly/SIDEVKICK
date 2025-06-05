@@ -536,7 +536,7 @@ const AISuggestionsPanel: React.FC<AISuggestionsPanelProps> = ({
           <Button
             variant="contained"
             color="primary"
-            onClick={onApplyActions}
+            onClick={() => onApplyActions()}
             disabled={isLoading}
             aria-busy={isLoading}
           >
