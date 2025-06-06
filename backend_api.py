@@ -72,12 +72,22 @@ class ChatRequest(BaseModel):
 class AIAction(BaseModel):
     type: str
     file_path: Optional[str] = None
-    content: Optional[str] = None
+    content: Optional[str] = None  # For create, edit_complete, and contextual insert_*
     folder_path: Optional[str] = None
     command: Optional[str] = None
     description: Optional[str] = None
     message: Optional[str] = None
-    changes: Optional[List[Dict[str, Any]]] = None  # For partial edits
+    changes: Optional[List[Dict[str, Any]]] = (
+        None  # For partial edits / contextual_batch
+    )
+
+    # Fields for EDIT_FILE_CONTEXTUAL (single operation)
+    operation: Optional[str] = None
+    target_content: Optional[str] = None
+    replacement_content: Optional[str] = None
+    anchor_content: Optional[str] = None
+    before_context: Optional[str] = None
+    after_context: Optional[str] = None
 
 
 class AIResponse(BaseModel):
@@ -156,8 +166,9 @@ async def configure_api_key(request: ApiKeyRequest):
 
         default_model_for_provider = PROVIDER_DEFAULT_MODELS.get(request.provider)
         if not default_model_for_provider:
-            # Fallback if provider is somehow unknown to our defaults, though UI should prevent this.
-            default_model_for_provider = "default-model"
+            default_model_for_provider = (
+                "default-model"  # Should not happen with frontend validation
+            )
             logger.warning(
                 f"Provider {request.provider} not in PROVIDER_DEFAULT_MODELS, using generic default."
             )
@@ -184,20 +195,18 @@ async def configure_api_key(request: ApiKeyRequest):
         current_ai_provider = request.provider
 
         if global_agent and global_agent.is_ready():
+            agent_name_for_message = request.provider.capitalize()
+            if request.provider == "gemini":  # Keep "Gemini" not "Gemini Agent"
+                agent_name_for_message = "Gemini"
             return {
-                "message": f"{request.provider.capitalize()} Agent configured successfully with model {global_agent.get_current_model_name()}.".replace(
-                    "Gemini Agent", "Gemini"
-                )
+                "message": f"{agent_name_for_message} configured successfully with model {global_agent.get_current_model_name()}."
             }
         else:
-            # Agent-specific error should be logged by the agent's constructor/config method
             raise HTTPException(
                 status_code=500,
                 detail=f"Failed to initialize {request.provider.capitalize()} Agent. Check API key or server logs.",
             )
-    except (
-        ValueError
-    ) as ve:  # Catch specific errors like missing API key from agent constructors
+    except ValueError as ve:
         logger.error(f"Configuration ValueError for {request.provider}: {ve}")
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
@@ -214,16 +223,19 @@ async def load_project(request: ProjectPathRequest):
             status_code=400, detail="Invalid project path: Not a directory."
         )
     current_project_path = str(path.resolve())
-    chat_history = []
+    chat_history = []  # Clear history for new project
 
-    # Initialize RAG system for the project
     if use_rag:
         try:
-            logger.info("Initializing RAG system for project...")
-            utils.get_rag_system(current_project_path)
-            logger.info("RAG system initialized successfully")
+            logger.info(f"Initializing RAG system for project: {current_project_path}")
+            utils.get_rag_system(current_project_path)  # This will index if not cached
+            logger.info("RAG system initialized (or loaded from cache) successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize RAG system: {e}")
+            logger.error(
+                f"Failed to initialize RAG system for {current_project_path}: {e}"
+            )
+            # Optionally, notify client or disable RAG for this session
+            # For now, just log it. App will fallback to traditional if RAG fails in get_context.
 
     return {
         "message": f"Project '{path.name}' loaded successfully.",
@@ -236,8 +248,13 @@ async def get_project_structure_api():
     if not current_project_path:
         raise HTTPException(status_code=400, detail="No project loaded.")
     structure = utils.get_project_structure(current_project_path)
-    if not structure:
-        raise HTTPException(status_code=500, detail="Failed to get project structure.")
+    if (
+        not structure
+    ):  # Should return empty structure if dir is empty, or None if path invalid
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to get project structure (e.g. path issue or unreadable).",
+        )
     return structure
 
 
@@ -273,8 +290,6 @@ async def chat_with_ai(request: ChatRequest):
     global chat_history, global_agent, current_ai_provider, use_rag
 
     if not global_agent or not global_agent.is_ready():
-        # Attempt to re-initialize if necessary (e.g. if API key was set but an error occurred)
-        # This part might need more robust handling depending on how API keys are stored/managed if they can be invalid
         if (
             global_agent
             and hasattr(global_agent, "api_key")
@@ -288,10 +303,12 @@ async def chat_with_ai(request: ChatRequest):
                 global_agent.get_current_model_name()
                 or PROVIDER_DEFAULT_MODELS.get(current_ai_provider, "default-model")
             )
-            if not global_agent.set_model(model_to_try):
+            if not global_agent.set_model(
+                model_to_try
+            ):  # set_model re-runs _configure_model
                 raise HTTPException(
                     status_code=500,
-                    detail=f"{current_ai_provider.capitalize()} Agent not configured or not ready after re-init attempt.",
+                    detail=f"{current_ai_provider.capitalize()} Agent not configured or not ready after re-init attempt. Check API key.",
                 )
         else:
             raise HTTPException(
@@ -309,7 +326,7 @@ async def chat_with_ai(request: ChatRequest):
         )
         provider_default_model = PROVIDER_DEFAULT_MODELS.get(
             current_ai_provider, "default-model"
-        )  # Fallback for safety
+        )
         if not global_agent.set_model(provider_default_model):
             raise HTTPException(
                 status_code=500,
@@ -323,8 +340,10 @@ async def chat_with_ai(request: ChatRequest):
             f"Using AI model: {global_agent.get_current_model_name()} for {current_ai_provider}"
         )
 
-    # Choose context method: RAG or traditional
     should_use_rag = request.use_rag if request.use_rag is not None else use_rag
+    logger.info(
+        f"Chat request: RAG mode is {'enabled' if should_use_rag else 'disabled'}"
+    )
 
     if should_use_rag:
         try:
@@ -333,18 +352,19 @@ async def chat_with_ai(request: ChatRequest):
                 user_query=request.user_prompt,
                 project_path=current_project_path,
                 current_file=request.current_open_file_relative_path,
-                max_tokens=20000,
+                max_tokens=20000,  # This max_tokens is for RAG system, not model.
             )
             context_method = "RAG"
-            # Add editing recommendation for RAG
             project_files_context["editing_recommendation"] = (
-                "Use EDIT_FILE_COMPLETE - you have targeted chunks"
+                "Using RAG context. Prefer EDIT_FILE_COMPLETE for full files, or ensure sufficient context for partial edits if needed."
             )
         except Exception as e:
-            logger.error(f"RAG failed, falling back to traditional method: {e}")
+            logger.error(
+                f"RAG context retrieval failed: {e}. Falling back to traditional method."
+            )
             project_files_context = utils.get_context_with_editing_hints(
                 project_path=current_project_path,
-                use_rag=False,
+                use_rag=False,  # Force false for fallback
                 current_file=request.current_open_file_relative_path,
                 user_query=request.user_prompt,
             )
@@ -384,18 +404,30 @@ async def chat_with_ai(request: ChatRequest):
     chat_history.append({"role": "user", "content": request.user_prompt})
 
     ai_response_data = global_agent.get_ai_response(
-        request.user_prompt, ai_context, chat_history[:-1]
+        request.user_prompt,
+        ai_context,
+        chat_history[:-1],  # Pass history excluding current prompt
     )
 
-    # Add context metadata to response
-    if "rag_metadata" in project_files_context:
-        ai_response_data["context_info"] = {
+    if (
+        "rag_metadata" in project_files_context
+        and project_files_context["rag_metadata"]
+    ):
+        ai_response_data["context_info"] = {  # Add to the response for UI display
             "method": context_method,
             "chunks_used": project_files_context["rag_metadata"].get("total_chunks", 0),
             "estimated_tokens": project_files_context["rag_metadata"].get(
                 "estimated_tokens", 0
             ),
+            "full_files_provided": len(
+                project_files_context["rag_metadata"].get("full_files", [])
+            ),
+            "partial_files_provided": len(
+                project_files_context["rag_metadata"].get("partial_files", [])
+            ),
         }
+    elif context_method.startswith("Traditional"):
+        ai_response_data["context_info"] = {"method": context_method}
 
     chat_history.append({"role": "assistant", "content": ai_response_data})
     return AIResponse(**ai_response_data)
@@ -408,78 +440,116 @@ async def apply_ai_actions(request: ApplyActionsRequest):
 
     project_root_abs_path = Path(current_project_path)
     results = []
+    # Ensure CREATE_FOLDER actions happen first
     sorted_actions = sorted(
         request.actions,
         key=lambda x: 0 if x.type == "CREATE_FOLDER" else 1,
     )
 
     for action_item_model in sorted_actions:
+        # Convert Pydantic model to dict, excluding None values for cleaner logs and processing
         action_item = action_item_model.model_dump(exclude_none=True)
-        action_type = action_item["type"]
+        action_type = action_item.get(
+            "type"
+        )  # Use .get for safety, though type is required by Pydantic
+
         try:
+            if not action_type:  # Should be caught by Pydantic, but as a safeguard
+                raise ValueError("Action item is missing 'type' field.")
+
             if action_type == "CREATE_FOLDER":
                 folder_path = action_item.get("folder_path")
                 if not folder_path:
-                    raise ValueError("folder_path missing")
+                    raise ValueError("folder_path missing for CREATE_FOLDER")
                 folder_to_create_abs = (project_root_abs_path / folder_path).resolve()
+                # Ensure it's within project path (basic safety)
+                if (
+                    project_root_abs_path not in folder_to_create_abs.parents
+                    and folder_to_create_abs != project_root_abs_path
+                ):
+                    raise ValueError(
+                        f"Attempt to create folder outside project: {folder_path}"
+                    )
                 if not utils.create_folder_if_not_exists(str(folder_to_create_abs)):
                     raise Exception(f"Failed to create folder: {folder_path}")
                 results.append(
-                    {"type": action_type, "path_info": folder_path, "status": "success"}
+                    {
+                        "type": action_type,
+                        "path_info": folder_path,
+                        "status": "success",
+                        "detail": action_item.get("description"),
+                    }
                 )
 
             elif action_type == "EDIT_FILE_COMPLETE" or action_type == "EDIT_FILE":
                 file_path = action_item.get("file_path")
-                content = action_item.get("content")
+                content = action_item.get("content")  # content can be an empty string
                 if not file_path or content is None:
-                    raise ValueError("file_path or content missing")
+                    raise ValueError(
+                        "file_path or content missing for EDIT_FILE_COMPLETE"
+                    )
                 file_to_edit_abs = (project_root_abs_path / file_path).resolve()
-                if not utils.write_file_content(str(file_to_edit_abs), content):
-                    raise Exception(f"Failed to edit file: {file_path}")
+                if (
+                    project_root_abs_path not in file_to_edit_abs.parents
+                    and file_to_edit_abs != project_root_abs_path
+                ):
+                    raise ValueError(
+                        f"Attempt to edit file outside project: {file_path}"
+                    )
+                if not utils.write_file_content(
+                    str(file_to_edit_abs), content
+                ):  # write_file_content creates parent dirs
+                    raise Exception(
+                        f"Failed to write complete content to file: {file_path}"
+                    )
                 results.append(
-                    {"type": action_type, "path_info": file_path, "status": "success"}
+                    {
+                        "type": action_type,
+                        "path_info": file_path,
+                        "status": "success",
+                        "detail": action_item.get("description"),
+                    }
                 )
 
-            elif action_type == "EDIT_FILE_PARTIAL":
+            elif action_type == "EDIT_FILE_PARTIAL":  # Legacy line-based
                 file_path = action_item.get("file_path")
                 changes = action_item.get("changes", [])
-
                 if not file_path or not changes:
-                    raise ValueError("file_path or changes missing")
-
+                    raise ValueError(
+                        "file_path or changes missing for EDIT_FILE_PARTIAL"
+                    )
                 file_to_edit_abs = (project_root_abs_path / file_path).resolve()
-
                 if not file_to_edit_abs.exists():
-                    raise Exception(f"File does not exist: {file_path}")
+                    raise FileNotFoundError(
+                        f"File does not exist for EDIT_FILE_PARTIAL: {file_path}"
+                    )
 
-                # Read original content
                 original_content = file_to_edit_abs.read_text(
                     encoding="utf-8", errors="ignore"
                 )
-
-                # Validate and apply changes
                 valid, error_msg = DiffProcessor.validate_changes(
                     original_content, changes
                 )
                 if not valid:
-                    raise Exception(f"Invalid changes: {error_msg}")
+                    raise ValueError(
+                        f"Invalid partial changes for {file_path}: {error_msg}"
+                    )
 
                 modified_content = DiffProcessor.apply_partial_changes(
                     original_content, changes
                 )
-
                 if not utils.write_file_content(
                     str(file_to_edit_abs), modified_content
                 ):
                     raise Exception(
                         f"Failed to write partial changes to file: {file_path}"
                     )
-
                 results.append(
                     {
                         "type": action_type,
                         "path_info": file_path,
                         "status": "success",
+                        "detail": action_item.get("description"),
                         "changes_applied": len(changes),
                     }
                 )
@@ -488,62 +558,145 @@ async def apply_ai_actions(request: ApplyActionsRequest):
                 file_path = action_item.get("file_path")
                 content = action_item.get("content")
                 if not file_path or content is None:
-                    raise ValueError("file_path or content missing")
+                    raise ValueError("file_path or content missing for CREATE_FILE")
                 file_to_create_abs = (project_root_abs_path / file_path).resolve()
+                if (
+                    project_root_abs_path not in file_to_create_abs.parents
+                    and file_to_create_abs != project_root_abs_path
+                ):
+                    raise ValueError(
+                        f"Attempt to create file outside project: {file_path}"
+                    )
                 if not utils.create_folder_if_not_exists(
                     str(file_to_create_abs.parent)
-                ):
-                    raise Exception(f"Failed to create parent dir for: {file_path}")
+                ):  # Ensure parent dir
+                    raise Exception(
+                        f"Failed to create parent directory for: {file_path}"
+                    )
                 if not utils.write_file_content(str(file_to_create_abs), content):
                     raise Exception(f"Failed to create file: {file_path}")
                 results.append(
-                    {"type": action_type, "path_info": file_path, "status": "success"}
+                    {
+                        "type": action_type,
+                        "path_info": file_path,
+                        "status": "success",
+                        "detail": action_item.get("description"),
+                    }
                 )
 
             elif action_type == "EDIT_FILE_CONTEXTUAL":
                 file_path = action_item.get("file_path")
-
                 if not file_path:
-                    raise ValueError("file_path is required for contextual edit")
+                    raise ValueError("file_path is required for EDIT_FILE_CONTEXTUAL")
 
                 file_to_edit_abs = (project_root_abs_path / file_path).resolve()
-
                 if not file_to_edit_abs.exists():
-                    raise Exception(f"File does not exist: {file_path}")
+                    raise FileNotFoundError(
+                        f"File does not exist for EDIT_FILE_CONTEXTUAL: {file_path}"
+                    )
 
-                # Read original content
                 original_content = file_to_edit_abs.read_text(
                     encoding="utf-8", errors="ignore"
                 )
+                logger.info(f"Processing EDIT_FILE_CONTEXTUAL for {file_path}")
 
-                logger.info(f"Applying contextual edit to {file_path}")
+                operation = action_item.get("operation")
+                if not operation:
+                    logger.warning(
+                        f"Missing 'operation' field in EDIT_FILE_CONTEXTUAL for {file_path}. Attempting to infer."
+                    )
+                    # Inference logic starts here
+                    has_target = bool(action_item.get("target_content"))
+                    has_replacement = (
+                        "replacement_content" in action_item
+                    )  # Replacement can be empty string
+                    has_anchor = bool(action_item.get("anchor_content"))
+                    has_content_for_insert = (
+                        "content" in action_item
+                    )  # Inserted content can be empty string
 
-                # Create a single change from the action
+                    if has_target and has_replacement:
+                        operation = "replace"
+                        logger.info(f"Inferred 'replace' for {file_path}")
+                    elif has_anchor and has_content_for_insert:
+                        # Default to insert_before if ambiguous. AI should be specific.
+                        operation = "insert_before"
+                        logger.info(
+                            f"Inferred 'insert_before' (anchor provided) for {file_path}"
+                        )
+                    elif has_target:  # Only non-empty target_content provided
+                        operation = "delete"
+                        logger.info(
+                            f"Inferred 'delete' (only target provided) for {file_path}"
+                        )
+                    elif has_content_for_insert and not has_target and not has_anchor:
+                        logger.warning(
+                            f"Content-only contextual edit attempt for {file_path}. This is ambiguous."
+                        )
+                        current_ai_content = action_item.get("content", "")
+                        if (
+                            file_path.endswith(".go")
+                            and "\\tcase " in current_ai_content
+                        ):
+                            operation = "insert_before"
+                            # Try to find a sensible anchor for Go switch
+                            if "\\tdefault:" in original_content:
+                                action_item["anchor_content"] = "\\tdefault:"
+                            else:
+                                action_item["anchor_content"] = (
+                                    "\\t}"  # Fallback closing brace
+                                )
+                            logger.info(
+                                f"Go-specific heuristic: Inferred 'insert_before' for switch case. Anchor: '{action_item['anchor_content']}'."
+                            )
+                        else:
+                            logger.error(
+                                f"Cannot infer operation for ambiguous content-only edit in {file_path}."
+                            )
+                            raise ValueError(
+                                "Ambiguous content-only edit. AI must provide 'operation' and 'anchor_content' for inserts, or 'target_content'."
+                            )
+                    else:
+                        logger.error(
+                            f"Cannot infer operation for {file_path}. Fields: {list(action_item.keys())}"
+                        )
+                        raise ValueError(
+                            "Cannot infer 'operation'. Ensure 'operation' and its required fields (non-empty target/anchor) are provided by AI."
+                        )
+
+                    action_item["operation"] = (
+                        operation  # Store inferred operation back into action_item
+                    )
+
+                # Prepare the single change for the processor
                 contextual_change = {
-                    "operation": action_item.get("operation"),
+                    "operation": action_item.get(
+                        "operation"
+                    ),  # Now guaranteed to have an operation
                     "target_content": action_item.get("target_content"),
                     "replacement_content": action_item.get("replacement_content"),
-                    "anchor_content": action_item.get("anchor_content"),
+                    "anchor_content": action_item.get(
+                        "anchor_content"
+                    ),  # Might have been set by inference
+                    "content": action_item.get("content"),
                     "before_context": action_item.get("before_context"),
                     "after_context": action_item.get("after_context"),
-                    "content": action_item.get("content"),  # For insert operations
+                    "description": action_item.get(
+                        "description", "Single contextual edit"
+                    ),
                 }
 
-                # Validate the contextual change
                 valid, error_msg = ContextualDiffProcessor.validate_contextual_changes(
                     original_content, [contextual_change]
                 )
                 if not valid:
-                    logger.error(f"Contextual validation failed: {error_msg}")
-                    raise Exception(f"Invalid contextual change: {error_msg}")
-
-                try:
-                    modified_content = ContextualDiffProcessor.apply_contextual_changes(
-                        original_content, [contextual_change]
+                    raise ValueError(
+                        f"Invalid contextual change for {file_path}: {error_msg}"
                     )
-                except Exception as e:
-                    logger.error(f"Failed to apply contextual change: {e}")
-                    raise Exception(f"Failed to apply contextual change: {str(e)}")
+
+                modified_content = ContextualDiffProcessor.apply_contextual_changes(
+                    original_content, [contextual_change]
+                )
 
                 if not utils.write_file_content(
                     str(file_to_edit_abs), modified_content
@@ -551,76 +704,82 @@ async def apply_ai_actions(request: ApplyActionsRequest):
                     raise Exception(
                         f"Failed to write contextual changes to file: {file_path}"
                     )
-
                 results.append(
                     {
                         "type": action_type,
                         "path_info": file_path,
                         "status": "success",
                         "operation": action_item.get("operation"),
+                        "detail": action_item.get("description"),
                     }
                 )
 
-            # Also add support for multiple contextual changes in one action
             elif action_type == "EDIT_FILE_CONTEXTUAL_BATCH":
                 file_path = action_item.get("file_path")
-                contextual_changes = action_item.get("changes", [])
-
-                if not file_path or not contextual_changes:
+                contextual_changes_list = action_item.get("changes", [])
+                if not file_path or not contextual_changes_list:
                     raise ValueError(
-                        "file_path and changes are required for contextual batch edit"
+                        "file_path and changes are required for EDIT_FILE_CONTEXTUAL_BATCH"
                     )
 
                 file_to_edit_abs = (project_root_abs_path / file_path).resolve()
-
                 if not file_to_edit_abs.exists():
-                    raise Exception(f"File does not exist: {file_path}")
+                    raise FileNotFoundError(
+                        f"File does not exist for BATCH edit: {file_path}"
+                    )
 
-                # Read original content
                 original_content = file_to_edit_abs.read_text(
                     encoding="utf-8", errors="ignore"
                 )
-
                 logger.info(
-                    f"Applying {len(contextual_changes)} contextual changes to {file_path}"
+                    f"Processing BATCH for {file_path} with {len(contextual_changes_list)} changes."
                 )
 
-                # Validate all contextual changes
+                for idx, chg_item in enumerate(contextual_changes_list):
+                    if not chg_item.get("operation"):
+                        # Basic check. Complex inference per item in batch is out of scope here.
+                        # AI must provide 'operation' for each change in a batch.
+                        raise ValueError(
+                            f"Change {idx+1} in batch for {file_path} is missing 'operation'."
+                        )
+                    if (
+                        "description" not in chg_item
+                    ):  # Ensure description for logging in processor
+                        chg_item["description"] = (
+                            f"Batch item {idx+1}: {chg_item.get('operation')}"
+                        )
+
                 valid, error_msg = ContextualDiffProcessor.validate_contextual_changes(
-                    original_content, contextual_changes
+                    original_content, contextual_changes_list
                 )
                 if not valid:
-                    logger.error(f"Contextual validation failed: {error_msg}")
-                    raise Exception(f"Invalid contextual changes: {error_msg}")
-
-                try:
-                    modified_content = ContextualDiffProcessor.apply_contextual_changes(
-                        original_content, contextual_changes
+                    raise ValueError(
+                        f"Invalid contextual batch changes for {file_path}: {error_msg}"
                     )
-                except Exception as e:
-                    logger.error(f"Failed to apply contextual changes: {e}")
-                    raise Exception(f"Failed to apply contextual changes: {str(e)}")
 
+                modified_content = ContextualDiffProcessor.apply_contextual_changes(
+                    original_content, contextual_changes_list
+                )
                 if not utils.write_file_content(
                     str(file_to_edit_abs), modified_content
                 ):
                     raise Exception(
-                        f"Failed to write contextual changes to file: {file_path}"
+                        f"Failed to write contextual batch changes to file: {file_path}"
                     )
-
                 results.append(
                     {
                         "type": action_type,
                         "path_info": file_path,
                         "status": "success",
-                        "changes_applied": len(contextual_changes),
+                        "detail": action_item.get("description"),
+                        "changes_applied": len(contextual_changes_list),
                     }
                 )
 
             elif action_type == "EXECUTE_SHELL_COMMAND":
                 command = action_item.get("command")
                 if not command:
-                    raise ValueError("command missing")
+                    raise ValueError("command missing for EXECUTE_SHELL_COMMAND")
                 process = subprocess.run(
                     command,
                     shell=True,
@@ -643,14 +802,19 @@ async def apply_ai_actions(request: ApplyActionsRequest):
                         "command": command,
                         "status": status,
                         "output": cmd_output.model_dump(),
+                        "detail": action_item.get("description"),
                     }
                 )
+
             elif action_type == "GENERAL_MESSAGE":
                 results.append(
                     {
                         "type": action_type,
                         "status": "skipped",
-                        "detail": "General message, no operation.",
+                        "message": action_item.get("message", "No message."),
+                        "detail": action_item.get(
+                            "description", "General informational message."
+                        ),
                     }
                 )
             else:
@@ -658,24 +822,28 @@ async def apply_ai_actions(request: ApplyActionsRequest):
                     {
                         "type": action_type,
                         "status": "skipped",
-                        "detail": "Unknown action type",
+                        "detail": f"Unknown or unsupported action type: {action_type}",
                     }
                 )
         except Exception as e:
+            logger.error(
+                f"Error applying action {action_item.get('type', 'UnknownType')}: {e}",
+                exc_info=True,
+            )
             path_info = (
                 action_item.get("file_path")
                 or action_item.get("folder_path")
                 or action_item.get("command")
+                or "N/A"
             )
             results.append(
                 {
-                    "type": action_type,
+                    "type": action_item.get("type", "UnknownTypeOnError"),
                     "path_info": path_info,
                     "status": "error",
                     "detail": str(e),
                 }
             )
-
     return {"results": results}
 
 
@@ -684,59 +852,71 @@ async def apply_ai_actions(request: ApplyActionsRequest):
 
 @app.get("/rag/settings")
 async def get_rag_settings():
-    """Get current RAG settings"""
     global use_rag
-    return {"enabled": use_rag, "max_tokens": 20000}
+    return {
+        "enabled": use_rag,
+        "max_tokens": 20000,
+    }  # max_tokens is illustrative for now
 
 
 @app.post("/rag/settings")
 async def update_rag_settings(settings: RAGSettings):
-    """Update RAG settings"""
     global use_rag
     use_rag = settings.enabled
+    # Potentially re-initialize or clear RAG system if settings change significantly
+    # For now, just toggle the global flag. The next chat request will use the new setting.
+    logger.info(f"RAG usage set to: {'enabled' if use_rag else 'disabled'}")
     return {
-        "message": f"RAG {'enabled' if use_rag else 'disabled'}",
-        "settings": settings,
+        "message": f"RAG {'enabled' if use_rag else 'disabled'}.",
+        "settings": {"enabled": use_rag, "max_tokens": settings.max_tokens},
     }
 
 
 @app.post("/rag/reindex")
 async def reindex_project():
-    """Force reindexing of the current project"""
     if not current_project_path:
-        raise HTTPException(status_code=400, detail="No project loaded.")
+        raise HTTPException(status_code=400, detail="No project loaded to reindex.")
 
     try:
-        # Clear existing cache
-        utils.invalidate_rag_cache(current_project_path)
-
-        # Reindex
-        rag_system = utils.get_rag_system(current_project_path)
-        chunk_count = rag_system.index_project()
+        utils.invalidate_rag_cache(current_project_path)  # Clear old cache
+        rag_system = utils.get_rag_system(current_project_path)  # This will re-index
+        chunk_count = len(
+            rag_system.chunks
+        )  # Assuming index_project updates self.chunks
 
         return {
-            "message": "Project reindexed successfully",
+            "message": "Project reindexed successfully for RAG.",
             "chunks_indexed": chunk_count,
         }
     except Exception as e:
-        logger.error(f"Failed to reindex project: {e}")
+        logger.error(
+            f"Failed to reindex project {current_project_path}: {e}", exc_info=True
+        )
         raise HTTPException(status_code=500, detail=f"Reindexing failed: {str(e)}")
 
 
 @app.get("/rag/status")
 async def get_rag_status():
-    """Get RAG system status for current project"""
     if not current_project_path:
-        raise HTTPException(status_code=400, detail="No project loaded.")
-
+        return {  # Return a default non-indexed status if no project
+            "indexed": False,
+            "total_chunks": 0,
+            "cache_exists": False,
+            "message": "No project loaded.",
+        }
     try:
+        # Get RAG system without forcing re-index if cache exists and is valid
         rag_system = utils.get_rag_system(current_project_path)
         return {
-            "indexed": len(rag_system.chunks) > 0,
-            "total_chunks": len(rag_system.chunks),
-            "cache_exists": rag_system.chunks_cache_file.exists(),
+            "indexed": bool(
+                rag_system.index and rag_system.chunks
+            ),  # More robust check
+            "total_chunks": len(rag_system.chunks) if rag_system.chunks else 0,
+            "cache_exists": rag_system.chunks_cache_file.exists()
+            and rag_system.index_cache_file.exists(),
         }
     except Exception as e:
+        logger.error(f"Error getting RAG status for {current_project_path}: {e}")
         return {
             "indexed": False,
             "total_chunks": 0,
@@ -770,7 +950,7 @@ async def git_add_all():
 
 @app.post("/git/commit", response_model=CommandOutput)
 async def git_commit(request: GitCommitRequest):
-    if not request.message:
+    if not request.message or not request.message.strip():
         raise HTTPException(status_code=400, detail="Commit message cannot be empty.")
     return run_git_command(
         ["git", "commit", "-m", request.message], current_project_path

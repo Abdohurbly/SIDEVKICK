@@ -167,7 +167,7 @@ export const getModelInfo = (modelId: AIModelId): AIModelInfo | undefined => {
 
 export const getProviderFromModelId = (modelId: AIModelId): AIProvider => {
   const model = getModelInfo(modelId);
-  return model?.provider || 'gemini';
+  return model?.provider || 'gemini'; // Default to gemini if provider not found
 };
 
 export const getProviderDisplayName = (provider: AIProvider): string => {
@@ -197,7 +197,8 @@ export const validateApiKey = (apiKey: string, provider: AIProvider): string | n
       }
       break;
     case 'gemini':
-      if (apiKey.length < 20) {
+      // Gemini keys don't have a fixed prefix, but they are usually long.
+      if (apiKey.length < 30) { // Adjusted length based on common key lengths
         return 'Gemini API key appears to be too short';
       }
       break;
@@ -267,23 +268,38 @@ export interface ChatRequest {
   use_rag?: boolean;
 }
 
-export interface AIAction {
-  type: string;
-  file_path?: string;
+// Base for contextual edit fields, used in AIAction and ContextualChange
+interface ContextualEditFields {
+  target_content?: string;
+  replacement_content?: string;
+  anchor_content?: string;
+  before_context?: string;
+  after_context?: string;
+  // 'content' is for insert_before/insert_after, and also EDIT_FILE_COMPLETE
   content?: string;
-  folder_path?: string;
-  command?: string;
-  description?: string;
-  message?: string;
-  changes?: PartialEditChange[]; // New field for partial edits
+  description?: string; // Description for this specific change
 }
 
-export interface PartialEditChange {
-  operation: 'replace' | 'insert' | 'delete';
+export interface PartialEditChange extends ContextualEditFields {
+  operation: 'replace' | 'insert' | 'delete' | 'insert_before' | 'insert_after'; // Added more contextual ops
+  // Line-based fields (for legacy EDIT_FILE_PARTIAL)
   start_line?: number;
   end_line?: number;
-  line?: number;
-  content?: string;
+  line?: number; // for line-based insert
+}
+
+export interface AIAction extends ContextualEditFields {
+  type: string;
+  file_path?: string;
+  // content?: string; // Already in ContextualEditFields
+  folder_path?: string;
+  command?: string;
+  // description?: string; // Already in ContextualEditFields
+  message?: string;
+  // For EDIT_FILE_CONTEXTUAL_BATCH or EDIT_FILE_PARTIAL (legacy)
+  changes?: PartialEditChange[];
+  // For EDIT_FILE_CONTEXTUAL - direct operation type
+  operation?: 'replace' | 'insert_before' | 'insert_after' | 'delete';
 }
 
 
@@ -316,6 +332,8 @@ export interface ApplyActionDetail {
   status: 'success' | 'error' | 'skipped';
   detail?: string;
   output?: CommandOutput;
+  operation?: string; // For EDIT_FILE_CONTEXTUAL status
+  changes_applied?: number; // For batch/partial edits
 }
 
 export interface ApplyActionsRequest {
@@ -359,20 +377,27 @@ export type PreviewDevice = 'desktop' | 'tablet' | 'mobile';
 export const STORAGE_KEYS = {
   THEME: 'app_theme',
   SELECTED_MODEL: 'selected_ai_model',
-  API_CONFIGS: 'api_configurations',
+  API_CONFIGS: 'api_configurations', // Stores multiple provider configs
   PROJECT_PATH: 'project_path',
   PREVIEW_URL: 'preview_url',
-  AUTO_SAVE: 'auto_save_enabled',
-  RAG_ENABLED: 'rag_enabled',
+  AUTO_SAVE: 'auto_save_enabled', // If editor auto-saves on change
+  AUTO_APPLY_SUGGESTIONS: 'auto_apply_ai_suggestions',
+  RAG_ENABLED: 'rag_enabled', // Persist RAG preference
 } as const;
 
 // App Settings
+export interface APIProviderConfig {
+  apiKey: string;
+  lastUsedModel?: AIModelId; // Store last used model per provider
+}
+
 export interface AppSettings {
   theme: Theme;
-  selectedModel: AIModelId;
-  apiConfigurations: Partial<Record<AIProvider, { apiKey: string; lastUsedModel: AIModelId }>>;
+  // selectedModel: AIModelId; // This might become provider-specific
+  apiConfigurations: Partial<Record<AIProvider, APIProviderConfig>>;
   projectPath: string;
   previewUrl: string;
   autoSave: boolean;
+  autoApplyAiSuggestions: boolean;
   ragEnabled: boolean;
 }

@@ -7,8 +7,12 @@ import {
   ToggleButtonGroup,
   Typography,
   IconButton,
+  Tooltip,
 } from "@mui/material";
 import RefreshIcon from "@mui/icons-material/Refresh";
+import DesktopWindowsIcon from "@mui/icons-material/DesktopWindows";
+import TabletMacIcon from "@mui/icons-material/TabletMac";
+import PhoneIphoneIcon from "@mui/icons-material/PhoneIphone";
 import { PreviewDevice } from "../types";
 
 interface PreviewPanelProps {
@@ -48,7 +52,12 @@ const PreviewPanel: React.FC<PreviewPanelProps> = ({
 
   const handleRefresh = () => {
     if (iframeRef.current) {
-      iframeRef.current.src = previewUrl; // Re-assigning src to refresh
+      iframeRef.current.src = "about:blank"; // Clear content first
+      setTimeout(() => {
+        if (iframeRef.current) {
+          iframeRef.current.src = previewUrl; // Re-assigning src to refresh
+        }
+      }, 50);
     }
   };
 
@@ -68,9 +77,10 @@ const PreviewPanel: React.FC<PreviewPanelProps> = ({
         sx={{
           display: "flex",
           alignItems: "center",
-          gap: 2,
+          gap: 1, // Reduced gap
           mb: 1,
           flexWrap: "wrap",
+          px: 1, // Add some padding to controls bar
         }}
       >
         <TextField
@@ -80,15 +90,17 @@ const PreviewPanel: React.FC<PreviewPanelProps> = ({
           value={previewUrl}
           onChange={(e) => setPreviewUrl(e.target.value)}
           disabled={isLoading}
-          sx={{ flexGrow: 1, minWidth: "250px" }}
+          sx={{ flexGrow: 1, minWidth: "200px" }}
         />
-        <IconButton
-          onClick={handleRefresh}
-          disabled={isLoading}
-          title="Refresh Preview"
-        >
-          <RefreshIcon />
-        </IconButton>
+        <Tooltip title="Refresh Preview">
+          <IconButton
+            onClick={handleRefresh}
+            disabled={isLoading || !previewUrl}
+            size="small"
+          >
+            <RefreshIcon />
+          </IconButton>
+        </Tooltip>
         <ToggleButtonGroup
           value={previewDevice}
           exclusive
@@ -102,21 +114,21 @@ const PreviewPanel: React.FC<PreviewPanelProps> = ({
             aria-label="Desktop view"
             title="Desktop View"
           >
-            <RefreshIcon />
+            <DesktopWindowsIcon fontSize="small" />
           </ToggleButton>
           <ToggleButton
             value="tablet"
             aria-label="Tablet view"
             title="Tablet View"
           >
-            <RefreshIcon />
+            <TabletMacIcon fontSize="small" />
           </ToggleButton>
           <ToggleButton
             value="mobile"
             aria-label="Mobile view"
             title="Mobile View"
           >
-            <RefreshIcon />
+            <PhoneIphoneIcon fontSize="small" />
           </ToggleButton>
         </ToggleButtonGroup>
       </Box>
@@ -124,32 +136,43 @@ const PreviewPanel: React.FC<PreviewPanelProps> = ({
         variant="outlined"
         sx={{
           flexGrow: 1,
-          overflow: "hidden",
+          overflow: "hidden", // Important for iframe behavior
           borderColor: "divider",
           display: "flex",
           justifyContent: "center",
           alignItems: "center",
-          p: previewDevice === "desktop" ? 0 : 2,
-          bgcolor: previewDevice === "desktop" ? "transparent" : "action.hover",
+          p: previewDevice === "desktop" ? 0 : 1, // Reduced padding for non-desktop
+          bgcolor:
+            previewDevice === "desktop"
+              ? "transparent"
+              : "action.disabledBackground",
+          position: "relative", // For potential loading overlay
         }}
       >
-        <Box
-          component="iframe"
-          ref={iframeRef}
-          src={previewUrl}
-          title="Website Preview"
-          sx={{
-            width: currentDimensions.width,
-            height: currentDimensions.height,
-            border:
-              previewDevice === "desktop"
-                ? "none"
-                : (theme) => `1px solid ${theme.palette.divider}`,
-            boxShadow: previewDevice === "desktop" ? "none" : 3,
-            bgcolor: "background.paper",
-            transition: "width 0.3s ease-in-out, height 0.3s ease-in-out",
-          }}
-        />
+        {previewUrl ? (
+          <Box
+            component="iframe"
+            ref={iframeRef}
+            src={previewUrl}
+            title="Website Preview"
+            sx={{
+              width: currentDimensions.width,
+              height: currentDimensions.height,
+              border:
+                previewDevice === "desktop"
+                  ? "none"
+                  : (theme) => `1px solid ${theme.palette.divider}`,
+              boxShadow: previewDevice === "desktop" ? "none" : 2,
+              bgcolor: "background.paper", // iframe background
+              transition: "width 0.3s ease-in-out, height 0.3s ease-in-out",
+            }}
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups" // Security for iframe
+          />
+        ) : (
+          <Typography variant="caption" color="text.secondary">
+            Enter a URL to preview.
+          </Typography>
+        )}
       </Paper>
     </Box>
   );

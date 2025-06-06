@@ -76,16 +76,6 @@ export const configureApiKey = async (
   return response.data;
 };
 
-export const getFileContentForDiff = async (relativePath: string): Promise<string> => {
-  try {
-    const response = await getFileContent(relativePath);
-    return response.content;
-  } catch (error) {
-    console.warn(`Could not fetch content for ${relativePath}:`, error);
-    return "";
-  }
-};
-
 // Project Management
 export const loadProject = async (projectPath: string): Promise<ProjectLoadResponse> => {
   const payload: ProjectLoadRequest = { project_path: projectPath };
@@ -104,6 +94,17 @@ export const getFileContent = async (relativeFilePath: string): Promise<FileCont
     params: { relative_file_path: relativeFilePath }
   });
   return response.data;
+};
+
+// Specifically for fetching original content for diff views
+export const getFileContentForDiff = async (relativePath: string): Promise<string> => {
+  try {
+    const response = await getFileContent(relativePath);
+    return response.content;
+  } catch (error: any) {
+    console.warn(`Could not fetch content for diff of ${relativePath}:`, error.message);
+    return `// Error fetching original content for ${relativePath}: ${error.message}`;
+  }
 };
 
 export const saveFile = async (

@@ -23,298 +23,518 @@ class PatchOperation:
         self.content = content
 
 
+# diff_utils.py - Enhanced version
 class ContextualDiffProcessor:
-    """Handles applying contextual file changes using pattern matching"""
+
+    @staticmethod
+    def create_smart_edit(
+        content: str,
+        target_content: str,
+        replacement_content: str,
+        context_lines: int = 2,
+    ) -> Dict[str, Any]:
+        """
+        Automatically create before/after context for more precise edits
+        """
+        lines = content.splitlines()
+        target_lines = target_content.splitlines()
+
+        for i in range(len(lines) - len(target_lines) + 1):
+            if lines[i : i + len(target_lines)] == target_lines:
+                before_start = max(0, i - context_lines)
+                before_context = "\n".join(lines[before_start:i]) if i > 0 else ""
+                after_end = min(len(lines), i + len(target_lines) + context_lines)
+                after_context = (
+                    "\n".join(lines[i + len(target_lines) : after_end])
+                    if i + len(target_lines) < len(lines)
+                    else ""
+                )
+                return {
+                    "operation": "replace",
+                    "target_content": target_content,
+                    "replacement_content": replacement_content,
+                    "before_context": before_context,
+                    "after_context": after_context,
+                    "confidence": "high",
+                }
+        return {
+            "operation": "replace",
+            "target_content": target_content,
+            "replacement_content": replacement_content,
+            "confidence": "low",  # Fallback if exact match not found by this simple method
+        }
+
+    @staticmethod
+    def _apply_replace(current_content: str, change: Dict[str, Any]) -> str:
+        target = change.get("target_content", "")
+        replacement = change.get("replacement_content", "")
+        before_ctx = change.get("before_context")
+        after_ctx = change.get("after_context")
+
+        if not target:  # Target cannot be empty for replace
+            raise ValueError(
+                "target_content is required and cannot be empty for replace operation"
+            )
+
+        target_escaped = re.escape(target)
+
+        # Strategy 1: Full context match (most precise)
+        if (
+            before_ctx is not None and after_ctx is not None
+        ):  # Contexts can be empty strings
+            logger.info("Replace Strategy 1: Full context matching")
+            before_escaped = re.escape(before_ctx)
+            after_escaped = re.escape(after_ctx)
+            # Pattern allows for flexible whitespace (e.g. \n, spaces) between contexts and target
+            pattern = (
+                f"({before_escaped})(\\s*)({target_escaped})(\\s*)({after_escaped})"
+            )
+
+            def replace_func_strat1(match_obj):
+                return (
+                    match_obj.group(1)
+                    + match_obj.group(2)
+                    + replacement
+                    + match_obj.group(4)
+                    + match_obj.group(5)
+                )
+
+            new_content, num_subs = re.subn(
+                pattern,
+                replace_func_strat1,
+                current_content,
+                count=1,
+                flags=re.DOTALL | re.MULTILINE,
+            )
+            if num_subs > 0:
+                logger.info("✅ Full context match successful for replace")
+                return new_content
+
+        # Strategy 2: Before context only
+        if before_ctx is not None:
+            logger.info("Replace Strategy 2: Before context matching")
+            before_escaped = re.escape(before_ctx)
+            pattern = f"({before_escaped})(\\s*)({target_escaped})"
+
+            def replace_func_strat2(match_obj):
+                return match_obj.group(1) + match_obj.group(2) + replacement
+
+            new_content, num_subs = re.subn(
+                pattern,
+                replace_func_strat2,
+                current_content,
+                count=1,
+                flags=re.DOTALL | re.MULTILINE,
+            )
+            if num_subs > 0:
+                logger.info("✅ Before context match successful for replace")
+                return new_content
+
+        # Strategy 3: After context only
+        if after_ctx is not None:
+            logger.info("Replace Strategy 3: After context matching")
+            after_escaped = re.escape(after_ctx)
+            pattern = f"({target_escaped})(\\s*)({after_escaped})"
+
+            def replace_func_strat3(match_obj):
+                return replacement + match_obj.group(2) + match_obj.group(3)
+
+            new_content, num_subs = re.subn(
+                pattern,
+                replace_func_strat3,
+                current_content,
+                count=1,
+                flags=re.DOTALL | re.MULTILINE,
+            )
+            if num_subs > 0:
+                logger.info("✅ After context match successful for replace")
+                return new_content
+
+        # Strategy 4: Direct target match (no context)
+        logger.info("Replace Strategy 4: Direct target matching")
+        pattern = f"({target_escaped})"  # Just the target
+
+        def replace_func_strat4(match_obj):
+            return replacement
+
+        new_content, num_subs = re.subn(
+            pattern,
+            replace_func_strat4,
+            current_content,
+            count=1,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+        if num_subs > 0:
+            logger.info("✅ Direct target match successful for replace")
+            return new_content
+
+        # Strategy 5: Line-by-line fuzzy matching (from original, less preferred)
+        logger.info(
+            "Replace Strategy 5: Attempting line-by-line fuzzy matching (less precise)"
+        )
+        lines = current_content.splitlines()
+        target_lines_list = target.splitlines()
+
+        for i in range(len(lines) - len(target_lines_list) + 1):
+            match = True
+            for j, target_line_item in enumerate(target_lines_list):
+                if lines[i + j].strip() != target_line_item.strip():
+                    match = False
+                    break
+            if match:
+                replacement_lines = replacement.splitlines()
+                temp_lines = (
+                    current_content.splitlines()
+                )  # Use original splitlines for reconstruction
+                temp_lines[i : i + len(target_lines_list)] = replacement_lines
+                logger.info("✅ Line-by-line fuzzy match successful for replace")
+                return "\n".join(temp_lines)
+
+        raise ValueError(
+            f"Could not find target content for replacement: '{target[:100]}...'. Ensure target and context (if provided) exactly match the file."
+        )
+
+    @staticmethod
+    def _apply_insert_before(current_content: str, change: Dict[str, Any]) -> str:
+        anchor = change.get("anchor_content")
+        content_to_insert = change.get("content", "")
+        before_ctx = change.get("before_context")
+        after_ctx = change.get("after_context")
+
+        if not anchor:  # Anchor cannot be None or empty string
+            raise ValueError(
+                "anchor_content is required and cannot be empty for insert_before operation"
+            )
+
+        anchor_escaped = re.escape(anchor)
+
+        if before_ctx is not None and after_ctx is not None:
+            logger.info("Insert_Before Strategy 1: Full context")
+            pat = f"({re.escape(before_ctx)})(\\s*)({anchor_escaped})(\\s*)({re.escape(after_ctx)})"
+            repl_func = (
+                lambda m: m.group(1)
+                + m.group(2)
+                + content_to_insert
+                + m.group(3)
+                + m.group(4)
+                + m.group(5)
+            )
+            new_content, num_subs = re.subn(
+                pat, repl_func, current_content, count=1, flags=re.DOTALL | re.MULTILINE
+            )
+            if num_subs > 0:
+                return new_content
+
+        if before_ctx is not None:
+            logger.info("Insert_Before Strategy 2: Before context")
+            pat = f"({re.escape(before_ctx)})(\\s*)({anchor_escaped})"
+            repl_func = (
+                lambda m: m.group(1) + m.group(2) + content_to_insert + m.group(3)
+            )
+            new_content, num_subs = re.subn(
+                pat, repl_func, current_content, count=1, flags=re.DOTALL | re.MULTILINE
+            )
+            if num_subs > 0:
+                return new_content
+
+        if after_ctx is not None:
+            logger.info("Insert_Before Strategy 3: After context")
+            pat = f"({anchor_escaped})(\\s*)({re.escape(after_ctx)})"
+            repl_func = (
+                lambda m: content_to_insert + m.group(1) + m.group(2) + m.group(3)
+            )
+            new_content, num_subs = re.subn(
+                pat, repl_func, current_content, count=1, flags=re.DOTALL | re.MULTILINE
+            )
+            if num_subs > 0:
+                return new_content
+
+        logger.info("Insert_Before Strategy 4: Direct anchor")
+        pat = f"({anchor_escaped})"
+        repl_func = lambda m: content_to_insert + m.group(1)
+        new_content, num_subs = re.subn(
+            pat, repl_func, current_content, count=1, flags=re.DOTALL | re.MULTILINE
+        )
+        if num_subs > 0:
+            return new_content
+
+        raise ValueError(
+            f"Could not find anchor_content for insert_before: '{anchor[:100]}...'. Ensure anchor and context (if provided) exactly match."
+        )
+
+    @staticmethod
+    def _apply_insert_after(current_content: str, change: Dict[str, Any]) -> str:
+        anchor = change.get("anchor_content")
+        content_to_insert = change.get("content", "")
+        before_ctx = change.get("before_context")
+        after_ctx = change.get("after_context")
+
+        if not anchor:  # Anchor cannot be None or empty string
+            raise ValueError(
+                "anchor_content is required and cannot be empty for insert_after operation"
+            )
+
+        anchor_escaped = re.escape(anchor)
+
+        if before_ctx is not None and after_ctx is not None:
+            logger.info("Insert_After Strategy 1: Full context")
+            pat = f"({re.escape(before_ctx)})(\\s*)({anchor_escaped})(\\s*)({re.escape(after_ctx)})"
+            repl_func = (
+                lambda m: m.group(1)
+                + m.group(2)
+                + m.group(3)
+                + content_to_insert
+                + m.group(4)
+                + m.group(5)
+            )
+            new_content, num_subs = re.subn(
+                pat, repl_func, current_content, count=1, flags=re.DOTALL | re.MULTILINE
+            )
+            if num_subs > 0:
+                return new_content
+
+        if before_ctx is not None:  # Match anchor when it's preceded by before_ctx
+            logger.info("Insert_After Strategy 2: Before context (insert after anchor)")
+            pat = f"({re.escape(before_ctx)})(\\s*)({anchor_escaped})"
+            repl_func = (
+                lambda m: m.group(1) + m.group(2) + m.group(3) + content_to_insert
+            )
+            new_content, num_subs = re.subn(
+                pat, repl_func, current_content, count=1, flags=re.DOTALL | re.MULTILINE
+            )
+            if num_subs > 0:
+                return new_content
+
+        if after_ctx is not None:  # Match anchor when it's followed by after_ctx
+            logger.info("Insert_After Strategy 3: After context (insert after anchor)")
+            pat = f"({anchor_escaped})(\\s*)({re.escape(after_ctx)})"
+            # Insert content *after* the anchor, but *before* its own whitespace and after_ctx
+            repl_func = (
+                lambda m: m.group(1) + content_to_insert + m.group(2) + m.group(3)
+            )
+            new_content, num_subs = re.subn(
+                pat, repl_func, current_content, count=1, flags=re.DOTALL | re.MULTILINE
+            )
+            if num_subs > 0:
+                return new_content
+
+        logger.info("Insert_After Strategy 4: Direct anchor")
+        pat = f"({anchor_escaped})"
+        repl_func = lambda m: m.group(1) + content_to_insert
+        new_content, num_subs = re.subn(
+            pat, repl_func, current_content, count=1, flags=re.DOTALL | re.MULTILINE
+        )
+        if num_subs > 0:
+            return new_content
+
+        raise ValueError(
+            f"Could not find anchor_content for insert_after: '{anchor[:100]}...'. Ensure anchor and context (if provided) exactly match."
+        )
+
+    @staticmethod
+    def _apply_delete(current_content: str, change: Dict[str, Any]) -> str:
+        target = change.get("target_content")
+        before_ctx = change.get("before_context")
+        after_ctx = change.get("after_context")
+
+        if not target:  # Target cannot be None or empty string for delete
+            raise ValueError(
+                "target_content is required and cannot be empty for delete operation"
+            )
+
+        target_escaped = re.escape(target)
+
+        if before_ctx is not None and after_ctx is not None:
+            logger.info("Delete Strategy 1: Full context")
+            pat = f"({re.escape(before_ctx)})(\\s*)({target_escaped})(\\s*)({re.escape(after_ctx)})"
+            repl_func = lambda m: m.group(1) + m.group(2) + m.group(4) + m.group(5)
+            new_content, num_subs = re.subn(
+                pat, repl_func, current_content, count=1, flags=re.DOTALL | re.MULTILINE
+            )
+            if num_subs > 0:
+                return new_content
+
+        if before_ctx is not None:
+            logger.info("Delete Strategy 2: Before context")
+            pat = f"({re.escape(before_ctx)})(\\s*)({target_escaped})"
+            repl_func = lambda m: m.group(1) + m.group(2)
+            new_content, num_subs = re.subn(
+                pat, repl_func, current_content, count=1, flags=re.DOTALL | re.MULTILINE
+            )
+            if num_subs > 0:
+                return new_content
+
+        if after_ctx is not None:
+            logger.info("Delete Strategy 3: After context")
+            pat = f"({target_escaped})(\\s*)({re.escape(after_ctx)})"
+            repl_func = lambda m: m.group(2) + m.group(3)
+            new_content, num_subs = re.subn(
+                pat, repl_func, current_content, count=1, flags=re.DOTALL | re.MULTILINE
+            )
+            if num_subs > 0:
+                return new_content
+
+        logger.info("Delete Strategy 4: Direct target")
+        pat = f"({target_escaped})"
+        repl_func = lambda m: ""
+        new_content, num_subs = re.subn(
+            pat, repl_func, current_content, count=1, flags=re.DOTALL | re.MULTILINE
+        )
+        if num_subs > 0:
+            return new_content
+
+        raise ValueError(
+            f"Could not find target_content for delete: '{target[:100]}...'. Ensure target and context (if provided) exactly match."
+        )
 
     @staticmethod
     def apply_contextual_changes(
         original_content: str, changes: List[Dict[str, Any]]
     ) -> str:
-        """Apply a list of contextual changes to the original content"""
-        content = original_content
-
-        # Process changes in order (no need to reverse for contextual changes)
-        for i, change in enumerate(changes):
-            operation = change.get("operation")
-            logger.info(f"Applying contextual change {i+1}/{len(changes)}: {operation}")
-
-            try:
-                if operation == "replace":
-                    content = ContextualDiffProcessor._apply_replace(content, change)
-                elif operation == "insert_after":
-                    content = ContextualDiffProcessor._apply_insert_after(
-                        content, change
-                    )
-                elif operation == "insert_before":
-                    content = ContextualDiffProcessor._apply_insert_before(
-                        content, change
-                    )
-                elif operation == "delete":
-                    content = ContextualDiffProcessor._apply_delete(content, change)
-                else:
-                    logger.warning(f"Unknown contextual operation: {operation}")
-
-            except Exception as e:
-                logger.error(f"Failed to apply contextual change {i+1}: {e}")
-                raise Exception(f"Contextual change {i+1} failed: {str(e)}")
-
-        return content
-
-    @staticmethod
-    def _apply_replace(content: str, change: Dict[str, Any]) -> str:
-        """Apply a contextual replace operation"""
-        target = change.get("target_content", "")
-        replacement = change.get("replacement_content", "")
-        before_ctx = change.get("before_context", "")
-        after_ctx = change.get("after_context", "")
-
-        if not target:
-            raise ValueError("target_content is required for replace operation")
-
-        # Try different matching strategies
-
-        # Strategy 1: Full context match (most precise)
-        if before_ctx and after_ctx:
-            logger.info("Using full context matching")
-            pattern = (
-                re.escape(before_ctx)
-                + r"\s*"
-                + re.escape(target)
-                + r"\s*"
-                + re.escape(after_ctx)
+        modified_content = original_content
+        for i, change_item in enumerate(changes):  # Renamed change to change_item
+            # Ensure change_item is a dict, as Pydantic models might be passed in some contexts
+            change_data = (
+                change_item
+                if isinstance(change_item, dict)
+                else change_item.model_dump(exclude_none=True)
             )
-            replacement_full = before_ctx + replacement + after_ctx
 
-            if re.search(pattern, content, re.DOTALL):
-                content = re.sub(
-                    pattern, replacement_full, content, count=1, flags=re.DOTALL
-                )
-                logger.info("Full context match successful")
-                return content
-
-        # Strategy 2: Target with partial context
-        if before_ctx:
-            logger.info("Using before context matching")
-            pattern = re.escape(before_ctx) + r"\s*" + re.escape(target)
-            replacement_full = before_ctx + replacement
-
-            if re.search(pattern, content, re.DOTALL):
-                content = re.sub(
-                    pattern, replacement_full, content, count=1, flags=re.DOTALL
-                )
-                logger.info("Before context match successful")
-                return content
-
-        if after_ctx:
-            logger.info("Using after context matching")
-            pattern = re.escape(target) + r"\s*" + re.escape(after_ctx)
-            replacement_full = replacement + after_ctx
-
-            if re.search(pattern, content, re.DOTALL):
-                content = re.sub(
-                    pattern, replacement_full, content, count=1, flags=re.DOTALL
-                )
-                logger.info("After context match successful")
-                return content
-
-        # Strategy 3: Direct target match (least precise)
-        if target in content:
-            logger.info("Using direct target matching")
-            content = content.replace(target, replacement, 1)
-            logger.info("Direct target match successful")
-            return content
-
-        # Strategy 4: Fuzzy matching for slight variations
-        logger.info("Attempting fuzzy matching")
-        fuzzy_result = ContextualDiffProcessor._fuzzy_replace(
-            content, target, replacement
-        )
-        if fuzzy_result != content:
-            logger.info("Fuzzy match successful")
-            return fuzzy_result
-
-        raise ValueError(
-            f"Could not find target content for replacement: {target[:100]}..."
-        )
-
-    @staticmethod
-    def _apply_insert_after(content: str, change: Dict[str, Any]) -> str:
-        """Insert content after an anchor"""
-        anchor = change.get("anchor_content", "")
-        new_content = change.get("content", "")
-
-        if not anchor:
-            raise ValueError("anchor_content is required for insert_after operation")
-
-        if anchor in content:
-            logger.info("Direct anchor match for insert_after")
-            return content.replace(anchor, anchor + new_content, 1)
-
-        # Try fuzzy matching
-        fuzzy_result = ContextualDiffProcessor._fuzzy_insert_after(
-            content, anchor, new_content
-        )
-        if fuzzy_result != content:
-            logger.info("Fuzzy anchor match for insert_after")
-            return fuzzy_result
-
-        raise ValueError(
-            f"Could not find anchor content for insertion: {anchor[:100]}..."
-        )
-
-    @staticmethod
-    def _apply_insert_before(content: str, change: Dict[str, Any]) -> str:
-        """Insert content before an anchor"""
-        anchor = change.get("anchor_content", "")
-        new_content = change.get("content", "")
-
-        if not anchor:
-            raise ValueError("anchor_content is required for insert_before operation")
-
-        if anchor in content:
-            logger.info("Direct anchor match for insert_before")
-            return content.replace(anchor, new_content + anchor, 1)
-
-        # Try fuzzy matching
-        fuzzy_result = ContextualDiffProcessor._fuzzy_insert_before(
-            content, anchor, new_content
-        )
-        if fuzzy_result != content:
-            logger.info("Fuzzy anchor match for insert_before")
-            return fuzzy_result
-
-        raise ValueError(
-            f"Could not find anchor content for insertion: {anchor[:100]}..."
-        )
-
-    @staticmethod
-    def _apply_delete(content: str, change: Dict[str, Any]) -> str:
-        """Delete content based on target or context"""
-        target = change.get("target_content", "")
-        before_ctx = change.get("before_context", "")
-        after_ctx = change.get("after_context", "")
-
-        if not target:
-            raise ValueError("target_content is required for delete operation")
-
-        # Similar to replace but with empty replacement
-        if before_ctx and after_ctx:
-            pattern = (
-                re.escape(before_ctx)
-                + r"\s*"
-                + re.escape(target)
-                + r"\s*"
-                + re.escape(after_ctx)
+            operation = change_data.get("operation")
+            description = change_data.get("description", f"Change {i+1}")
+            logger.info(
+                f"Applying contextual change: operation='{operation}', description='{description}'"
             )
-            replacement = before_ctx + after_ctx
 
-            if re.search(pattern, content, re.DOTALL):
-                return re.sub(pattern, replacement, content, count=1, flags=re.DOTALL)
-
-        if target in content:
-            return content.replace(target, "", 1)
-
-        raise ValueError(
-            f"Could not find target content for deletion: {target[:100]}..."
-        )
-
-    @staticmethod
-    def _fuzzy_replace(content: str, target: str, replacement: str) -> str:
-        """Attempt fuzzy matching for replacement"""
-        # Remove extra whitespace and try again
-        normalized_target = " ".join(target.split())
-        normalized_content = " ".join(content.split())
-
-        if normalized_target in normalized_content:
-            # Find the original whitespace-preserved version
-            lines = content.splitlines()
-            for i, line in enumerate(lines):
-                if normalized_target in " ".join(line.split()):
-                    # Replace in this line
-                    lines[i] = line.replace(target.strip(), replacement.strip())
-                    return "\n".join(lines)
-
-        return content  # No change if fuzzy match fails
-
-    @staticmethod
-    def _fuzzy_insert_after(content: str, anchor: str, new_content: str) -> str:
-        """Attempt fuzzy matching for insert_after"""
-        # Try with normalized whitespace
-        normalized_anchor = " ".join(anchor.split())
-        lines = content.splitlines()
-
-        for i, line in enumerate(lines):
-            if normalized_anchor in " ".join(line.split()):
-                # Insert after this line
-                lines.insert(i + 1, new_content)
-                return "\n".join(lines)
-
-        return content
-
-    @staticmethod
-    def _fuzzy_insert_before(content: str, anchor: str, new_content: str) -> str:
-        """Attempt fuzzy matching for insert_before"""
-        # Try with normalized whitespace
-        normalized_anchor = " ".join(anchor.split())
-        lines = content.splitlines()
-
-        for i, line in enumerate(lines):
-            if normalized_anchor in " ".join(line.split()):
-                # Insert before this line
-                lines.insert(i, new_content)
-                return "\n".join(lines)
-
-        return content
+            if operation == "replace":
+                modified_content = ContextualDiffProcessor._apply_replace(
+                    modified_content, change_data
+                )
+            elif operation == "insert_before":
+                modified_content = ContextualDiffProcessor._apply_insert_before(
+                    modified_content, change_data
+                )
+            elif operation == "insert_after":
+                modified_content = ContextualDiffProcessor._apply_insert_after(
+                    modified_content, change_data
+                )
+            elif operation == "delete":
+                modified_content = ContextualDiffProcessor._apply_delete(
+                    modified_content, change_data
+                )
+            else:
+                logger.error(
+                    f"Unsupported contextual operation: {operation} for change: {change_data}"
+                )
+                raise ValueError(f"Unsupported contextual operation: {operation}")
+        return modified_content
 
     @staticmethod
     def validate_contextual_changes(
         original_content: str, changes: List[Dict[str, Any]]
     ) -> Tuple[bool, str]:
-        """Validate that contextual changes can be applied"""
-        for i, change in enumerate(changes):
-            operation = change.get("operation")
+        for i, change_item in enumerate(changes):
+            change_data = (
+                change_item
+                if isinstance(change_item, dict)
+                else change_item.model_dump(exclude_none=True)
+            )
+            operation = change_data.get("operation")
+            description = change_data.get("description", f"Change {i+1}")
 
-            if operation == "replace":
-                target = change.get("target_content", "")
-                if not target:
+            if not operation:
+                return (
+                    False,
+                    f"Change {i+1} ('{description}') is missing 'operation' field.",
+                )
+
+            # Validate required fields based on operation
+            if operation in ["replace", "delete"]:
+                target_content_val = change_data.get("target_content")
+                if target_content_val is None:  # Must be present
                     return (
                         False,
-                        f"Change {i+1}: target_content is required for replace operation",
+                        f"Change {i+1} ('{description}', op: {operation}) is missing 'target_content'.",
                     )
-
-                if target not in original_content:
-                    # Try fuzzy matching
-                    normalized_target = " ".join(target.split())
-                    normalized_content = " ".join(original_content.split())
-                    if normalized_target not in normalized_content:
-                        return False, f"Change {i+1}: target_content not found in file"
-
-            elif operation in ["insert_after", "insert_before"]:
-                anchor = change.get("anchor_content", "")
-                if not anchor:
+                if not target_content_val:  # Cannot be empty string
                     return (
                         False,
-                        f"Change {i+1}: anchor_content is required for {operation} operation",
+                        f"Change {i+1} ('{description}', op: {operation}) 'target_content' cannot be empty.",
                     )
-
-                if anchor not in original_content:
-                    # Try fuzzy matching
-                    normalized_anchor = " ".join(anchor.split())
-                    normalized_content = " ".join(original_content.split())
-                    if normalized_anchor not in normalized_content:
-                        return False, f"Change {i+1}: anchor_content not found in file"
-
-            elif operation == "delete":
-                target = change.get("target_content", "")
-                if not target:
+                search_term_escaped = re.escape(target_content_val)
+                term_type_for_error, term_value_for_error = (
+                    "target_content",
+                    target_content_val,
+                )
+            elif operation in ["insert_before", "insert_after"]:
+                anchor_content_val = change_data.get("anchor_content")
+                if anchor_content_val is None:  # Must be present
                     return (
                         False,
-                        f"Change {i+1}: target_content is required for delete operation",
+                        f"Change {i+1} ('{description}', op: {operation}) is missing 'anchor_content'.",
                     )
+                if not anchor_content_val:  # Cannot be empty string
+                    return (
+                        False,
+                        f"Change {i+1} ('{description}', op: {operation}) 'anchor_content' cannot be empty.",
+                    )
+                if (
+                    change_data.get("content") is None
+                ):  # Content to insert must be present (can be empty string)
+                    return (
+                        False,
+                        f"Change {i+1} ('{description}', op: {operation}) is missing 'content' to insert.",
+                    )
+                search_term_escaped = re.escape(anchor_content_val)
+                term_type_for_error, term_value_for_error = (
+                    "anchor_content",
+                    anchor_content_val,
+                )
+            else:
+                return (
+                    False,
+                    f"Change {i+1} ('{description}') has unsupported operation: {operation}",
+                )
 
-                if target not in original_content:
-                    return False, f"Change {i+1}: target_content not found for deletion"
+            # Check if the search term (target or anchor) can be found with any context combination
+            found_match = False
+            before_ctx_val = change_data.get("before_context")
+            after_ctx_val = change_data.get("after_context")
 
+            # Strategy 1: Full context (if both provided)
+            if before_ctx_val is not None and after_ctx_val is not None:
+                pat = f"{re.escape(before_ctx_val)}\\s*{search_term_escaped}\\s*{re.escape(after_ctx_val)}"
+                if re.search(pat, original_content, flags=re.DOTALL | re.MULTILINE):
+                    found_match = True
+
+            # Strategy 2: Before context only (if provided and full context didn't match or wasn't applicable)
+            if not found_match and before_ctx_val is not None:
+                pat = f"{re.escape(before_ctx_val)}\\s*{search_term_escaped}"
+                if re.search(pat, original_content, flags=re.DOTALL | re.MULTILINE):
+                    found_match = True
+
+            # Strategy 3: After context only (if provided and previous didn't match)
+            if not found_match and after_ctx_val is not None:
+                pat = f"{search_term_escaped}\\s*{re.escape(after_ctx_val)}"
+                if re.search(pat, original_content, flags=re.DOTALL | re.MULTILINE):
+                    found_match = True
+
+            # Strategy 4: Direct term match (if no context provided or context strategies failed)
+            if not found_match:
+                if re.search(
+                    search_term_escaped,
+                    original_content,
+                    flags=re.DOTALL | re.MULTILINE,
+                ):
+                    found_match = True
+
+            if not found_match:
+                return False, (
+                    f"Change {i+1} ('{description}', op: {operation}): "
+                    f"Could not find {term_type_for_error} '{str(term_value_for_error)[:50]}...' "
+                    f"with given context (Before: '{str(before_ctx_val)[:20]}...', After: '{str(after_ctx_val)[:20]}...'). "
+                    f"Ensure target/anchor and context exactly match content in the file."
+                )
         return True, ""
 
 
@@ -331,67 +551,59 @@ class DiffProcessor:
 
         logger.info(f"Original content has {total_lines} lines")
 
-        # Sort changes by line number in reverse order to avoid offset issues
         sorted_changes = sorted(
             changes, key=lambda x: x.get("start_line", x.get("line", 0)), reverse=True
         )
 
         for i, change in enumerate(sorted_changes):
             operation = change.get("operation")
-            logger.info(f"Applying change {i+1}/{len(sorted_changes)}: {operation}")
+            logger.info(
+                f"Applying legacy partial change {i+1}/{len(sorted_changes)}: {operation}"
+            )
 
             if operation == "replace":
-                start_line = change["start_line"] - 1  # Convert to 0-based indexing
+                start_line = change["start_line"] - 1
                 end_line = change["end_line"] - 1
-                new_content = change["content"]
+                new_content = change.get(
+                    "content", ""
+                )  # Default to empty string if None
 
-                # Add bounds checking
-                if start_line < 0 or end_line >= total_lines:
+                if start_line < 0 or end_line >= total_lines or start_line > end_line:
                     logger.error(
-                        f"Line numbers out of bounds: {start_line+1}-{end_line+1} (file has {total_lines} lines)"
+                        f"Line numbers out of bounds or invalid range for replace: {start_line+1}-{end_line+1} (file has {total_lines} lines)"
                     )
                     continue
 
-                # Ensure new content ends with newline if original did
-                if (
-                    not new_content.endswith("\n")
-                    and start_line < len(lines)
-                    and lines[start_line].endswith("\n")
-                ):
-                    new_content += "\n"
-
-                # Replace the lines
-                lines[start_line : end_line + 1] = [new_content] if new_content else []
+                lines[start_line : end_line + 1] = (
+                    [new_content] if new_content or new_content == "" else []
+                )
                 total_lines = len(lines)
 
             elif operation == "insert":
-                line = change["line"]  # This is after which line to insert
-                new_content = change["content"]
+                line_idx = change[
+                    "line"
+                ]  # 0-based index: insert *before* this line index.
+                # So if line=0, inserts at beginning. if line=len(lines), appends.
+                new_content = change.get("content", "")
 
-                if line < 0 or line > total_lines:
+                if line_idx < 0 or line_idx > total_lines:
                     logger.error(
-                        f"Insert line {line} out of bounds (file has {total_lines} lines)"
+                        f"Insert line index {line_idx} out of bounds (file has {total_lines} lines, insert valid 0 to {total_lines})"
                     )
                     continue
-
-                if not new_content.endswith("\n"):
-                    new_content += "\n"
-
-                # Insert after the specified line
-                lines.insert(line, new_content)
+                lines.insert(line_idx, new_content)
                 total_lines = len(lines)
 
             elif operation == "delete":
                 start_line = change["start_line"] - 1
                 end_line = change.get("end_line", change["start_line"]) - 1
 
-                if start_line < 0 or end_line >= total_lines:
+                if start_line < 0 or end_line >= total_lines or start_line > end_line:
                     logger.error(
-                        f"Delete line numbers out of bounds: {start_line+1}-{end_line+1} (file has {total_lines} lines)"
+                        f"Delete line numbers out of bounds or invalid range: {start_line+1}-{end_line+1} (file has {total_lines} lines)"
                     )
                     continue
 
-                # Delete the specified lines
                 del lines[start_line : end_line + 1]
                 total_lines = len(lines)
 
@@ -404,7 +616,6 @@ class DiffProcessor:
         fromfile: str = "original",
         tofile: str = "modified",
     ) -> str:
-        """Generate a unified diff between two strings"""
         original_lines = original.splitlines(keepends=True)
         modified_lines = modified.splitlines(keepends=True)
 
@@ -415,139 +626,200 @@ class DiffProcessor:
             tofile=tofile,
             lineterm="",
         )
-
         return "".join(diff)
 
     @staticmethod
     def validate_changes(
         original_content: str, changes: List[Dict[str, Any]]
     ) -> Tuple[bool, str]:
-        """Validate that changes can be applied to the original content"""
         lines = original_content.splitlines()
-        max_line = len(lines)
+        max_line_num_for_replace_delete = len(
+            lines
+        )  # 1-based max line number for start/end
+        max_line_idx_for_insert = len(
+            lines
+        )  # 0-based max line index for insert (append)
 
-        for change in changes:
+        for change_idx, change in enumerate(changes):
             operation = change.get("operation")
 
             if operation == "replace":
                 start_line = change.get("start_line", 0)
                 end_line = change.get("end_line", start_line)
 
-                if (
-                    start_line < 1
-                    or end_line < 1
-                    or start_line > max_line
-                    or end_line > max_line
+                if not (
+                    1 <= start_line <= max_line_num_for_replace_delete
+                    and 1 <= end_line <= max_line_num_for_replace_delete
                 ):
                     return (
                         False,
-                        f"Replace operation line numbers {start_line}-{end_line} are out of range (file has {max_line} lines)",
+                        f"Change {change_idx+1} (Replace): Line numbers {start_line}-{end_line} are out of range (file has {max_line_num_for_replace_delete} lines).",
                     )
-
                 if start_line > end_line:
                     return (
                         False,
-                        f"Replace operation start_line ({start_line}) > end_line ({end_line})",
+                        f"Change {change_idx+1} (Replace): start_line ({start_line}) > end_line ({end_line}).",
+                    )
+                if change.get("content") is None:
+                    return (
+                        False,
+                        f"Change {change_idx+1} (Replace): 'content' field is missing.",
                     )
 
             elif operation == "insert":
-                line = change.get("line", 0)
-                if line < 0 or line > max_line:
+                # 'line' is 0-based index, new content inserted *before* lines[line]
+                # Valid range for 'line' is 0 to len(lines) inclusive.
+                line_idx = change.get("line", -1)
+                if not (0 <= line_idx <= max_line_idx_for_insert):
                     return (
                         False,
-                        f"Insert operation line {line} is out of range (file has {max_line} lines)",
+                        f"Change {change_idx+1} (Insert): Line index {line_idx} is out of range (file has {len(lines)} lines, valid 0 to {max_line_idx_for_insert}).",
+                    )
+                if change.get("content") is None:
+                    return (
+                        False,
+                        f"Change {change_idx+1} (Insert): 'content' field is missing.",
                     )
 
             elif operation == "delete":
                 start_line = change.get("start_line", 0)
                 end_line = change.get("end_line", start_line)
 
-                if (
-                    start_line < 1
-                    or end_line < 1
-                    or start_line > max_line
-                    or end_line > max_line
+                if not (
+                    1 <= start_line <= max_line_num_for_replace_delete
+                    and 1 <= end_line <= max_line_num_for_replace_delete
                 ):
                     return (
                         False,
-                        f"Delete operation line numbers {start_line}-{end_line} are out of range (file has {max_line} lines)",
+                        f"Change {change_idx+1} (Delete): Line numbers {start_line}-{end_line} are out of range (file has {max_line_num_for_replace_delete} lines).",
                     )
-
                 if start_line > end_line:
                     return (
                         False,
-                        f"Delete operation start_line ({start_line}) > end_line ({end_line})",
+                        f"Change {change_idx+1} (Delete): start_line ({start_line}) > end_line ({end_line}).",
                     )
 
+            elif not operation:
+                return (False, f"Change {change_idx+1}: 'operation' field is missing.")
+            else:
+                return (
+                    False,
+                    f"Change {change_idx+1}: Unknown operation type '{operation}'.",
+                )
         return True, ""
 
 
 def create_change_preview(
     original_content: str, changes: List[Dict[str, Any]], file_path: str
 ) -> str:
-    """Create a preview of what changes will be applied"""
     lines = original_content.splitlines()
     preview_parts = []
+    sorted_changes_for_preview = sorted(
+        changes, key=lambda x: x.get("start_line", x.get("line", 0))
+    )
 
-    for change in sorted(changes, key=lambda x: x.get("start_line", x.get("line", 0))):
+    for change in sorted_changes_for_preview:
         operation = change.get("operation")
 
         if operation == "replace":
             start_line = change["start_line"]
             end_line = change["end_line"]
-            new_content = change["content"].strip()
-
+            new_content = change.get("content", "").strip()
             preview_parts.append(f"Replace lines {start_line}-{end_line}:")
+            old_lines_preview = " ".join(
+                lines[max(0, start_line - 1) : min(len(lines), end_line)]
+            )[:100]
             preview_parts.append(
-                f"  Old: {' '.join(lines[start_line-1:end_line])[:100]}..."
+                f"  Old: {old_lines_preview}..."
+                if len(old_lines_preview) >= 100
+                else f"  Old: {old_lines_preview}"
             )
-            preview_parts.append(f"  New: {new_content[:100]}...")
+            preview_parts.append(
+                f"  New: {new_content[:100]}..."
+                if len(new_content) >= 100
+                else f"  New: {new_content}"
+            )
 
         elif operation == "insert":
-            line = change["line"]
-            new_content = change["content"].strip()
-
-            preview_parts.append(f"Insert after line {line}:")
-            preview_parts.append(f"  Content: {new_content[:100]}...")
+            line_idx = change["line"]
+            new_content = change.get("content", "").strip()
+            preview_parts.append(
+                f"Insert before line index {line_idx} (physical line {line_idx+1}):"
+            )
+            preview_parts.append(
+                f"  Content: {new_content[:100]}..."
+                if len(new_content) >= 100
+                else f"  Content: {new_content}"
+            )
 
         elif operation == "delete":
             start_line = change["start_line"]
             end_line = change.get("end_line", start_line)
-
             preview_parts.append(f"Delete lines {start_line}-{end_line}:")
+            deleted_lines_preview = " ".join(
+                lines[max(0, start_line - 1) : min(len(lines), end_line)]
+            )[:100]
             preview_parts.append(
-                f"  Content: {' '.join(lines[start_line-1:end_line])[:100]}..."
+                f"  Content: {deleted_lines_preview}..."
+                if len(deleted_lines_preview) >= 100
+                else f"  Content: {deleted_lines_preview}"
             )
-
+        preview_parts.append("")
     return "\n".join(preview_parts)
 
 
 def create_contextual_change_preview(
     original_content: str, changes: List[Dict[str, Any]], file_path: str
 ) -> str:
-    """Create a preview of contextual changes"""
     preview_parts = []
+    for i, change_item in enumerate(changes):
+        change_data = (
+            change_item
+            if isinstance(change_item, dict)
+            else change_item.model_dump(exclude_none=True)
+        )
+        operation = change_data.get("operation", "Unknown operation")
+        desc = change_data.get("description", f"Change {i+1}")
+        preview_parts.append(f"--- Change: {desc} (Operation: {operation}) ---")
 
-    for i, change in enumerate(changes):
-        operation = change.get("operation")
-        preview_parts.append(f"Change {i+1}: {operation}")
+        before_ctx_val = change_data.get("before_context", "")[:50]
+        after_ctx_val = change_data.get("after_context", "")[:50]
 
         if operation == "replace":
-            target = change.get("target_content", "")[:100]
-            replacement = change.get("replacement_content", "")[:100]
-            preview_parts.append(f"  Target: {target}...")
-            preview_parts.append(f"  Replacement: {replacement}...")
+            target = change_data.get("target_content", "")[:100]
+            replacement = change_data.get("replacement_content", "")[:100]
+            preview_parts.append(f"  Target: '{target}'...")
+            if before_ctx_val:
+                preview_parts.append(
+                    f"    (Context Before Target: '{before_ctx_val}'...)"
+                )
+            if after_ctx_val:
+                preview_parts.append(
+                    f"    (Context After Target: '{after_ctx_val}'...)"
+                )
+            preview_parts.append(f"  Replacement: '{replacement}'...")
 
         elif operation in ["insert_after", "insert_before"]:
-            anchor = change.get("anchor_content", "")[:100]
-            content = change.get("content", "")[:100]
-            preview_parts.append(f"  Anchor: {anchor}...")
-            preview_parts.append(f"  Content: {content}...")
+            anchor = change_data.get("anchor_content", "")[:100]
+            content = change_data.get("content", "")[:100]
+            preview_parts.append(f"  Anchor: '{anchor}'...")
+            if before_ctx_val:
+                preview_parts.append(
+                    f"    (Context Before Anchor: '{before_ctx_val}'...)"
+                )
+            if after_ctx_val:
+                preview_parts.append(
+                    f"    (Context After Anchor: '{after_ctx_val}'...)"
+                )
+            preview_parts.append(f"  Content to insert: '{content}'...")
 
         elif operation == "delete":
-            target = change.get("target_content", "")[:100]
-            preview_parts.append(f"  Target: {target}...")
+            target = change_data.get("target_content", "")[:100]
+            preview_parts.append(f"  Target to delete: '{target}'...")
+            if before_ctx_val:
+                preview_parts.append(f"    (Context Before: '{before_ctx_val}'...)")
+            if after_ctx_val:
+                preview_parts.append(f"    (Context After: '{after_ctx_val}'...)")
 
-        preview_parts.append("")  # Empty line between changes
-
+        preview_parts.append("")
     return "\n".join(preview_parts)

@@ -14,7 +14,7 @@ import TreeItem, { TreeItemProps, treeItemClasses } from "@mui/lab/TreeItem";
 import { styled } from "@mui/material/styles";
 import FolderIcon from "@mui/icons-material/Folder";
 import InsertDriveFileOutlinedIcon from "@mui/icons-material/InsertDriveFileOutlined"; // Outlined version for cleaner look
-import FolderOpenIcon from "@mui/icons-material/FolderOpen";
+// import FolderOpenIcon from "@mui/icons-material/FolderOpen"; // Not directly used, TreeView handles open/close icons
 
 interface FileExplorerProps {
   projectStructure: ProjectStructureNode | null;
@@ -25,41 +25,46 @@ interface FileExplorerProps {
 // Custom TreeItem to match VS Code's compact and subtle style
 const StyledTreeItem = styled(
   (
-    props: TreeItemProps & { selectedPath: string | null; currentPath: string }
+    props: TreeItemProps & { isItemSelected: boolean } // Added isItemSelected
   ) => {
-    const { selectedPath, currentPath, ...other } = props;
+    const { isItemSelected, ...other } = props; // Destructure isItemSelected
     return <TreeItem {...other} />;
   }
-)(({ theme, selectedPath, currentPath }) => ({
+)(({ theme, isItemSelected }) => ({
+  // Use isItemSelected here
   [`& .${treeItemClasses.iconContainer}`]: {
     width: "auto",
-    marginRight: theme.spacing(0.5), // Reduced space next to icon
+    marginRight: theme.spacing(0.5),
     "& .close": {
-      // Not sure what .close refers to here, kept for now
       opacity: 0.3,
     },
   },
   [`& .${treeItemClasses.group}`]: {
-    marginLeft: theme.spacing(1.5), // 12px indent
-    paddingLeft: theme.spacing(1.5), // 12px indent guide space
-    borderLeft: `1px solid ${alpha(theme.palette.text.primary, 0.15)}`, // Subtler indent guide
+    marginLeft: theme.spacing(1.5),
+    paddingLeft: theme.spacing(1.5),
+    borderLeft: `1px solid ${alpha(theme.palette.text.primary, 0.15)}`,
   },
   [`& .${treeItemClasses.content}`]: {
-    padding: theme.spacing(0.25, 1), // Compact padding (2px top/bottom, 8px left/right)
-    borderRadius: theme.shape.borderRadius * 0.75, // Slightly less rounded
+    padding: theme.spacing(0.25, 1),
+    borderRadius: theme.shape.borderRadius * 0.75,
     minHeight: 28, // Ensure consistent item height
+    color: isItemSelected // Apply selected color to content text
+      ? theme.palette.mode === "dark"
+        ? theme.palette.primary.light
+        : theme.palette.primary.dark
+      : "inherit",
     "&:hover": {
       backgroundColor: theme.palette.action.hover,
     },
     "&.Mui-focused": {
-      // Remove default focus ring if not desired, or style it
-      backgroundColor: "transparent", // Or theme.palette.action.focus
+      backgroundColor: "transparent",
     },
     "&.Mui-selected": {
       backgroundColor: alpha(
         theme.palette.primary.main,
         theme.palette.mode === "dark" ? 0.25 : 0.15
-      ), // Selection color
+      ),
+      // This ensures the text inside the selected item is contrasted
       color:
         theme.palette.mode === "dark"
           ? theme.palette.primary.light
@@ -71,7 +76,6 @@ const StyledTreeItem = styled(
         ),
       },
       "&.Mui-focused": {
-        // Selected and focused
         backgroundColor: alpha(
           theme.palette.primary.main,
           theme.palette.mode === "dark" ? 0.3 : 0.2
@@ -80,9 +84,9 @@ const StyledTreeItem = styled(
     },
   },
   [`& .${treeItemClasses.label}`]: {
-    fontSize: "0.875rem", // VS Code like font size
+    fontSize: "0.875rem",
     padding: 0,
-    fontWeight: "inherit", // Handled by selected state
+    fontWeight: "inherit",
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
@@ -95,15 +99,16 @@ const renderTree = (
   node: ProjectStructureNode,
   onFileSelect: (filePath: string) => void,
   selectedFilePath: string | null,
-  level: number = 0
+  level: number = 0 // level can be used for aria attributes if needed
 ): React.ReactNode => {
   const isSelected =
     node.type === "file" && node.relative_path === selectedFilePath;
 
   return (
     <StyledTreeItem
-      key={node.path}
-      nodeId={node.relative_path} // Use relative_path for nodeId consistency with selection
+      key={node.path} // Use absolute path for key as it's guaranteed unique
+      nodeId={node.relative_path} // Use relative_path for nodeId for selection logic
+      isItemSelected={isSelected} // Pass selection state to StyledTreeItem
       label={
         <Box
           sx={{
@@ -122,40 +127,37 @@ const renderTree = (
             sx={{
               fontSize: "1.1rem",
               mr: 0.75,
-              color: isSelected ? "inherit" : "text.secondary", // Icon color matches text or selection
+              // Icon color should also change when selected
+              color: isSelected
+                ? "inherit" // Inherits from StyledTreeItem's content color
+                : "text.secondary",
             }}
           />
           <Typography
             variant="body2"
             sx={{
               fontSize: "0.875rem",
-              fontWeight: isSelected ? 500 : 400,
+              fontWeight: isSelected ? 500 : 400, // Emphasize selected file name
               flexGrow: 1,
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
+              // Text color is handled by StyledTreeItem's content color on selection
             }}
-            title={node.name}
+            title={node.name} // Show full name on hover
           >
             {node.name}
           </Typography>
         </Box>
       }
-      onClick={(event) => {
-        // Prevent toggle on label click if it's a directory, allow file selection
+      onClick={(event: React.MouseEvent) => {
         if (node.type === "file") {
           onFileSelect(node.relative_path);
         } else {
-          // Allow click on directory item to toggle, but not if clicking the expand icon area
-          const target = event.target as HTMLElement;
-          if (!target.closest(".MuiTreeItem-iconContainer")) {
-            // Potentially toggle expand/collapse here if TreeView doesn't handle it for the whole content area.
-            // Usually, TreeView handles this.
-          }
+          // For directories, MUI TreeView handles expand/collapse on the entire content area by default.
+          // No explicit toggle needed here unless specific behavior is desired.
         }
       }}
-      selectedPath={selectedFilePath}
-      currentPath={node.relative_path}
     >
       {Array.isArray(node.children)
         ? node.children.map((childNode) =>
@@ -188,12 +190,13 @@ const FileExplorer: React.FC<FileExplorerProps> = ({
       ): string[] | null => {
         for (const node of nodes) {
           if (node.relative_path === targetPath) {
-            return [...currentSearchPath, node.relative_path];
+            // Path to file itself, parents are currentSearchPath
+            return currentSearchPath;
           }
           if (node.type === "directory" && node.children) {
             const found = findPathToNode(node.children, targetPath, [
               ...currentSearchPath,
-              node.relative_path,
+              node.relative_path, // Add current directory to path
             ]);
             if (found) return found;
           }
@@ -201,21 +204,20 @@ const FileExplorer: React.FC<FileExplorerProps> = ({
         return null;
       };
 
-      const pathArray = findPathToNode(
-        projectStructure.children || [],
-        selectedFilePath
-      );
-      if (pathArray) {
-        // We want to expand all parent directories, but not the file itself if it's a leaf.
-        const directoriesToExpand = pathArray.slice(0, -1);
+      // Find path to the *parent* of the selected file, then expand those
+      const pathArray = projectStructure.children
+        ? findPathToNode(projectStructure.children, selectedFilePath)
+        : null;
+
+      if (pathArray && pathArray.length > 0) {
         setExpanded((prevExpanded) => {
-          // Add to existing expanded nodes, don't replace, to keep user's manual expansions
-          const newExpanded = new Set([
-            ...prevExpanded,
-            ...directoriesToExpand,
-          ]);
+          const newExpanded = new Set([...prevExpanded, ...pathArray]);
           return Array.from(newExpanded);
         });
+      } else if (pathArray && pathArray.length === 0 && selectedFilePath) {
+        // This means the selected file is at the root of the children list.
+        // No parents to expand other than possibly the root project node (if it were expandable).
+        // If projectStructure itself represents the root, then no expansion needed here for root files.
       }
     }
   }, [selectedFilePath, projectStructure]);
@@ -245,23 +247,23 @@ const FileExplorer: React.FC<FileExplorerProps> = ({
     <Box
       sx={{
         height: "100%",
-        overflowY: "hidden",
+        overflowY: "hidden", // Outer box manages flex, TreeView handles its own scroll
         display: "flex",
         flexDirection: "column",
-        bgcolor: "background.default",
+        bgcolor: "background.default", // Use theme default background
       }}
     >
       <Typography
-        variant="overline" // More subtle title like VS Code panels
+        variant="overline"
         sx={{
-          p: theme.spacing(1, 1.5, 0.5, 1.5),
+          p: theme.spacing(1, 1.5, 0.5, 1.5), // Consistent padding
           display: "block",
           color: "text.secondary",
           fontWeight: 500,
-          fontSize: "0.7rem", // Smaller overline
+          fontSize: "0.7rem",
           textTransform: "uppercase",
           borderBottom: `1px solid ${theme.palette.divider}`,
-          mb: 0.5,
+          mb: 0.5, // Space before TreeView
         }}
       >
         Project Explorer
@@ -269,16 +271,19 @@ const FileExplorer: React.FC<FileExplorerProps> = ({
       {projectStructure.children && projectStructure.children.length > 0 ? (
         <TreeView
           aria-label="file system navigator"
-          defaultCollapseIcon={<ExpandMoreIcon sx={{ fontSize: "1.2rem" }} />} // Adjusted icon size
-          defaultExpandIcon={<ChevronRightIcon sx={{ fontSize: "1.2rem" }} />}
+          defaultCollapseIcon={<ExpandMoreIcon sx={{ fontSize: "1.1rem" }} />} // Slightly smaller icons
+          defaultExpandIcon={<ChevronRightIcon sx={{ fontSize: "1.1rem" }} />}
           expanded={expanded}
-          selected={selectedFilePath || ""}
+          selected={selectedFilePath || ""} // Ensure selected prop is managed
           onNodeToggle={handleToggle}
+          // onNodeSelect is not needed if onClick on TreeItem handles file selection.
+          // If you want TreeView to manage selection state based on nodeId, use onNodeSelect.
+          // For direct file selection, onClick on TreeItem is fine.
           sx={{
             flexGrow: 1,
             width: "100%",
-            overflowY: "auto",
-            p: theme.spacing(0, 0.5, 0.5, 0.5), // Padding around the tree
+            overflowY: "auto", // Allow TreeView to scroll its content
+            p: theme.spacing(0, 0.5, 0.5, 0.5),
           }}
         >
           {projectStructure.children.map((node) =>

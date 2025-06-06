@@ -1,5 +1,6 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { AIAction, PartialEditChange } from "../types";
+import { getFileContentForDiff } from "../services/api"; // Import API call
 import {
   Box,
   Typography,
@@ -18,6 +19,8 @@ import {
   Divider,
   Tabs,
   Tab,
+  CircularProgress,
+  Tooltip,
 } from "@mui/material";
 import EditIcon from "@mui/icons-material/Edit";
 import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
@@ -28,167 +31,230 @@ import CodeIcon from "@mui/icons-material/Code";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import DifferenceIcon from "@mui/icons-material/Difference";
-import BuildIcon from "@mui/icons-material/Build";
+import BuildIcon from "@mui/icons-material/Build"; // For EDIT_FILE_PARTIAL (legacy)
+import CompareArrowsIcon from "@mui/icons-material/CompareArrows"; // For EDIT_FILE_CONTEXTUAL
+import PlaylistAddCheckIcon from "@mui/icons-material/PlaylistAddCheck"; // For EDIT_FILE_CONTEXTUAL_BATCH
+import DeleteIcon from "@mui/icons-material/Delete"; // For delete operations
+import AddIcon from "@mui/icons-material/Add"; // For insert operations
 
 interface AISuggestionsPanelProps {
   explanation?: string;
   aiActions: AIAction[];
-  onApplyActions: () => Promise<void>;
+  onApplyActions: (actionsToApply: AIAction[]) => Promise<void>; // Modified to accept actions
   isLoading: boolean;
 }
 
-const DiffViewer: React.FC<{
-  originalContent: string;
-  newContent?: string;
-  changes?: PartialEditChange[];
-  filePath: string;
-}> = ({ originalContent, newContent, changes, filePath }) => {
-  const [viewMode, setViewMode] = useState(0); // 0 = unified diff, 1 = side by side
+const ContextualChangeViewer: React.FC<{ change: PartialEditChange }> = ({
+  change,
+}) => {
+  const renderContent = (content: string | undefined, label: string) => {
+    if (!content) return null;
+    return (
+      <Box sx={{ mt: 0.5 }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ fontWeight: "bold" }}
+        >
+          {label}:
+        </Typography>
+        <Typography
+          component="pre"
+          sx={{
+            fontFamily: "monospace",
+            fontSize: "0.75rem",
+            whiteSpace: "pre-wrap",
+            maxHeight: 100,
+            overflow: "auto",
+            bgcolor: "background.paper",
+            p: 0.5,
+            borderRadius: 0.5,
+            border: "1px solid",
+            borderColor: "divider",
+            mt: 0.25,
+          }}
+        >
+          {content.slice(0, 300)}
+          {content.length > 300 && "..."}
+        </Typography>
+      </Box>
+    );
+  };
 
-  const generateUnifiedDiff = useMemo(() => {
-    if (!originalContent) return "No original content available";
-
-    if (newContent) {
-      // For complete file replacement
-      const originalLines = originalContent.split("\n");
-      const newLines = newContent.split("\n");
-
-      // Simple unified diff representation
-      const diff: string[] = [];
-      diff.push(`--- a/${filePath}`);
-      diff.push(`+++ b/${filePath}`);
-      diff.push(`@@ -1,${originalLines.length} +1,${newLines.length} @@`);
-
-      // Add context and changes (simplified)
-      newLines.forEach((line, i) => {
-        if (i < originalLines.length && originalLines[i] !== line) {
-          diff.push(`-${originalLines[i]}`);
-          diff.push(`+${line}`);
-        } else if (i >= originalLines.length) {
-          diff.push(`+${line}`);
-        } else {
-          diff.push(` ${line}`);
-        }
-      });
-
-      return diff.join("\n");
-    } else if (changes) {
-      // For partial changes
-      const diff: string[] = [];
-      diff.push(`--- a/${filePath}`);
-      diff.push(`+++ b/${filePath}`);
-
-      changes.forEach((change, i) => {
-        switch (change.operation) {
-          case "replace":
-            diff.push(
-              `@@ -${change.start_line},${
-                (change.end_line || change.start_line!) - change.start_line! + 1
-              } +${change.start_line},1 @@`
-            );
-            diff.push(
-              `-Lines ${change.start_line}-${
-                change.end_line || change.start_line
-              } (original)`
-            );
-            diff.push(`+${change.content || ""}`);
-            break;
-          case "insert":
-            diff.push(`@@ -${change.line},0 +${change.line},1 @@`);
-            diff.push(`+${change.content || ""}`);
-            break;
-          case "delete":
-            diff.push(
-              `@@ -${change.start_line},${
-                (change.end_line || change.start_line!) - change.start_line! + 1
-              } +${change.start_line},0 @@`
-            );
-            diff.push(
-              `-Lines ${change.start_line}-${
-                change.end_line || change.start_line
-              } (deleted)`
-            );
-            break;
-        }
-        if (i < changes.length - 1) diff.push("");
-      });
-
-      return diff.join("\n");
-    }
-
-    return "No changes to display";
-  }, [originalContent, newContent, changes, filePath]);
-
-  const generateChangesSummary = useMemo(() => {
-    if (!changes) return null;
-
-    return changes.map((change, i) => (
-      <Box
-        key={i}
-        sx={{ mb: 1, p: 1, bgcolor: "action.hover", borderRadius: 1 }}
-      >
-        <Box sx={{ display: "flex", alignItems: "center", mb: 0.5 }}>
-          <Chip
-            label={change.operation.toUpperCase()}
-            size="small"
-            color={
-              change.operation === "insert"
-                ? "success"
-                : change.operation === "delete"
-                ? "error"
-                : "warning"
-            }
-            sx={{ mr: 1, minWidth: 60 }}
-          />
+  return (
+    <Box sx={{ mb: 1, p: 1, bgcolor: "action.hover", borderRadius: 1 }}>
+      <Box sx={{ display: "flex", alignItems: "center", mb: 0.5, gap: 1 }}>
+        <Chip
+          label={(change.operation || "N/A").toUpperCase()}
+          size="small"
+          color={
+            change.operation?.includes("insert")
+              ? "success"
+              : change.operation?.includes("delete")
+              ? "error"
+              : change.operation?.includes("replace")
+              ? "warning"
+              : "default"
+          }
+          sx={{ minWidth: 80, fontWeight: "medium" }}
+        />
+        {change.description && (
           <Typography variant="caption" color="text.secondary">
-            {change.operation === "replace" &&
-              `Lines ${change.start_line}-${change.end_line}`}
-            {change.operation === "insert" && `After line ${change.line}`}
-            {change.operation === "delete" &&
-              `Lines ${change.start_line}-${
-                change.end_line || change.start_line
-              }`}
-          </Typography>
-        </Box>
-        {change.content && (
-          <Typography
-            variant="body2"
-            component="pre"
-            sx={{
-              fontFamily: "monospace",
-              fontSize: "0.75rem",
-              whiteSpace: "pre-wrap",
-              maxHeight: 100,
-              overflow: "auto",
-              bgcolor: "background.paper",
-              p: 1,
-              borderRadius: 0.5,
-              border: "1px solid",
-              borderColor: "divider",
-            }}
-          >
-            {change.content.slice(0, 500)}
-            {change.content.length > 500 ? "..." : ""}
+            {change.description}
           </Typography>
         )}
       </Box>
-    ));
-  }, [changes]);
+      {renderContent(change.before_context, "Context Before")}
+      {change.operation === "replace" &&
+        renderContent(change.target_content, "Target Content (to be replaced)")}
+      {change.operation === "replace" &&
+        renderContent(change.replacement_content, "Replacement Content")}
+
+      {change.operation?.includes("insert") &&
+        renderContent(change.anchor_content, "Anchor Content")}
+      {change.operation?.includes("insert") &&
+        renderContent(change.content, `Content to ${change.operation}`)}
+
+      {change.operation === "delete" &&
+        renderContent(change.target_content, "Target Content (to be deleted)")}
+      {renderContent(change.after_context, "Context After")}
+    </Box>
+  );
+};
+
+const DiffViewer: React.FC<{
+  originalContent: string;
+  action: AIAction;
+  isLoadingOriginal: boolean;
+}> = ({ originalContent, action, isLoadingOriginal }) => {
+  const [viewMode, setViewMode] = useState(0); // 0 = unified diff, 1 = changes summary
+
+  const filePath = action.file_path || "unknown_file";
+
+  const generateUnifiedDiff = useMemo(() => {
+    if (isLoadingOriginal) return "Loading original content for diff...";
+    if (!originalContent && action.type !== "CREATE_FILE")
+      return "Original content not available for diff.";
+
+    let newContentPreview = "";
+
+    if (action.type === "EDIT_FILE_COMPLETE" || action.type === "EDIT_FILE") {
+      newContentPreview = action.content || "";
+    } else if (action.type === "CREATE_FILE") {
+      newContentPreview = action.content || "";
+      // For create file, original is empty
+      const originalLines: string[] = [];
+      const newLines = newContentPreview.split("\n");
+      const diff: string[] = [];
+      diff.push(`--- a/ (new file)`);
+      diff.push(`+++ b/${filePath}`);
+      diff.push(`@@ -0,0 +1,${newLines.length} @@`);
+      newLines.forEach((line) => diff.push(`+${line}`));
+      return diff.join("\n");
+    }
+    // For partial/contextual, we'd need to apply changes to original to get newContent
+    // This is complex for a simple preview. For now, we'll show summary.
+
+    const originalLines = originalContent.split("\n");
+    const newLines = newContentPreview.split("\n");
+
+    const diff: string[] = [];
+    diff.push(`--- a/${filePath}`);
+    diff.push(`+++ b/${filePath}`);
+
+    // Basic line-by-line diff (very simplified)
+    const maxLength = Math.max(originalLines.length, newLines.length);
+    diff.push(`@@ -1,${originalLines.length} +1,${newLines.length} @@`);
+
+    for (let i = 0; i < maxLength; i++) {
+      const oldLine = originalLines[i];
+      const newLine = newLines[i];
+      if (oldLine !== undefined && newLine !== undefined) {
+        if (oldLine === newLine) {
+          diff.push(` ${oldLine}`);
+        } else {
+          diff.push(`-${oldLine}`);
+          diff.push(`+${newLine}`);
+        }
+      } else if (newLine !== undefined) {
+        diff.push(`+${newLine}`);
+      } else if (oldLine !== undefined) {
+        diff.push(`-${oldLine}`);
+      }
+    }
+    return diff.join("\n");
+  }, [originalContent, action, filePath, isLoadingOriginal]);
+
+  const renderChangesSummary = () => {
+    if (action.type === "EDIT_FILE_PARTIAL" && action.changes) {
+      return action.changes.map((change, i) => (
+        <ContextualChangeViewer key={`partial-${i}`} change={change} />
+      ));
+    }
+    if (action.type === "EDIT_FILE_CONTEXTUAL") {
+      // Create a single change object to pass to ContextualChangeViewer
+      const contextualChange: PartialEditChange = {
+        operation: action.operation!, // Should be present
+        target_content: action.target_content,
+        replacement_content: action.replacement_content,
+        anchor_content: action.anchor_content,
+        content: action.content, // For inserts
+        before_context: action.before_context,
+        after_context: action.after_context,
+        description: action.description,
+      };
+      return <ContextualChangeViewer change={contextualChange} />;
+    }
+    if (action.type === "EDIT_FILE_CONTEXTUAL_BATCH" && action.changes) {
+      return action.changes.map((change, i) => (
+        <ContextualChangeViewer key={`contextual-batch-${i}`} change={change} />
+      ));
+    }
+    return (
+      <Typography variant="caption">
+        No detailed changes summary for this action type.
+      </Typography>
+    );
+  };
+
+  const showSummaryTab =
+    action.type === "EDIT_FILE_PARTIAL" ||
+    action.type === "EDIT_FILE_CONTEXTUAL" ||
+    action.type === "EDIT_FILE_CONTEXTUAL_BATCH";
 
   return (
     <Box sx={{ width: "100%" }}>
-      <Box sx={{ borderBottom: 1, borderColor: "divider", mb: 2 }}>
+      <Box sx={{ borderBottom: 1, borderColor: "divider", mb: 1 }}>
         <Tabs
           value={viewMode}
           onChange={(e, v) => setViewMode(v)}
           aria-label="diff view mode"
+          variant="scrollable"
+          scrollButtons="auto"
         >
-          <Tab label="Unified Diff" />
-          {changes && <Tab label="Changes Summary" />}
+          <Tab
+            label="Unified Diff / Content"
+            sx={{ minWidth: 100, fontSize: "0.8rem" }}
+          />
+          {showSummaryTab && (
+            <Tab
+              label="Changes Summary"
+              sx={{ minWidth: 100, fontSize: "0.8rem" }}
+            />
+          )}
         </Tabs>
       </Box>
 
-      {viewMode === 0 && (
+      {isLoadingOriginal && viewMode === 0 && (
+        <Box sx={{ display: "flex", alignItems: "center", p: 2 }}>
+          <CircularProgress size={20} sx={{ mr: 1 }} />
+          <Typography variant="caption">
+            Loading original file for diff...
+          </Typography>
+        </Box>
+      )}
+
+      {viewMode === 0 && !isLoadingOriginal && (
         <Typography
           component="pre"
           sx={{
@@ -198,28 +264,25 @@ const DiffViewer: React.FC<{
             maxHeight: 300,
             overflow: "auto",
             bgcolor: "background.paper",
-            p: 1.5,
-            borderRadius: 1,
+            p: 1,
+            borderRadius: 0.5,
             border: "1px solid",
             borderColor: "divider",
-            "& .diff-add": {
-              bgcolor: "success.light",
-              color: "success.contrastText",
-            },
-            "& .diff-remove": {
-              bgcolor: "error.light",
-              color: "error.contrastText",
-            },
           }}
         >
           {generateUnifiedDiff}
         </Typography>
       )}
 
-      {viewMode === 1 && changes && (
-        <Box sx={{ maxHeight: 300, overflow: "auto" }}>
-          {generateChangesSummary}
+      {viewMode === 1 && showSummaryTab && (
+        <Box sx={{ maxHeight: 300, overflow: "auto", p: 0.5 }}>
+          {renderChangesSummary()}
         </Box>
+      )}
+      {viewMode === 1 && !showSummaryTab && (
+        <Typography variant="caption" sx={{ p: 1 }}>
+          No summary view for this action type.
+        </Typography>
       )}
     </Box>
   );
@@ -231,27 +294,52 @@ const ActionItem: React.FC<{ action: AIAction; index: number }> = ({
 }) => {
   const [open, setOpen] = React.useState(false);
   const [originalContent, setOriginalContent] = React.useState<string>("");
+  const [isLoadingOriginal, setIsLoadingOriginal] =
+    React.useState<boolean>(false);
 
-  // Fetch original content for diff when expanded
-  React.useEffect(() => {
+  const isDiffableAction = [
+    "EDIT_FILE_COMPLETE",
+    "EDIT_FILE_PARTIAL",
+    "EDIT_FILE", // Legacy
+    "EDIT_FILE_CONTEXTUAL",
+    "EDIT_FILE_CONTEXTUAL_BATCH",
+    "CREATE_FILE", // Diff against empty
+  ].includes(action.type);
+
+  useEffect(() => {
     if (
       open &&
-      (action.type === "EDIT_FILE_COMPLETE" ||
-        action.type === "EDIT_FILE_PARTIAL") &&
-      action.file_path
+      isDiffableAction &&
+      action.file_path &&
+      action.type !== "CREATE_FILE"
     ) {
-      // You'll need to implement this API call to get file content
-      // For now, we'll use a placeholder
-      setOriginalContent("// Original file content would be fetched here");
+      setIsLoadingOriginal(true);
+      getFileContentForDiff(action.file_path)
+        .then((content) => {
+          setOriginalContent(content);
+          setIsLoadingOriginal(false);
+        })
+        .catch((err) => {
+          console.error("Error fetching original content:", err);
+          setOriginalContent(
+            `// Failed to fetch original content: ${err.message}`
+          );
+          setIsLoadingOriginal(false);
+        });
+    } else if (action.type === "CREATE_FILE") {
+      setOriginalContent(""); // For CREATE_FILE, original is empty
+      setIsLoadingOriginal(false);
     }
-  }, [open, action]);
+  }, [open, action.type, action.file_path, isDiffableAction]);
 
   const handleToggle = () => {
+    // Expand if there's content/changes to show, or if it's a diffable action
     if (
       action.content ||
       action.changes ||
       (action.type === "EXECUTE_SHELL_COMMAND" && action.command) ||
-      (action.type === "GENERAL_MESSAGE" && action.message)
+      (action.type === "GENERAL_MESSAGE" && action.message) ||
+      isDiffableAction
     ) {
       setOpen(!open);
     }
@@ -260,34 +348,51 @@ const ActionItem: React.FC<{ action: AIAction; index: number }> = ({
   let icon;
   let primaryText = "";
   let secondaryText = action.description || "";
-  let contentToDisplay = action.content;
-  let showDiff = false;
+  let contentToDisplay = action.content; // Default content to show if not diff
+  let showDiffViewer = false;
 
   switch (action.type) {
     case "EDIT_FILE_COMPLETE":
+    case "EDIT_FILE": // Legacy
       icon = <EditIcon fontSize="small" />;
       primaryText = `Edit Complete: ${action.file_path}`;
-      secondaryText = action.description || "Complete file replacement";
-      showDiff = true;
+      secondaryText = action.description || "Replace entire file content";
+      showDiffViewer = true;
+      contentToDisplay = undefined; // DiffViewer will handle content
       break;
-    case "EDIT_FILE_PARTIAL":
+    case "EDIT_FILE_PARTIAL": // Legacy line-based
       icon = <BuildIcon fontSize="small" />;
-      primaryText = `Edit Partial: ${action.file_path}`;
-      const changesCount = action.changes?.length || 0;
-      secondaryText = action.description || `${changesCount} targeted changes`;
-      showDiff = true;
+      primaryText = `Edit Partial (Line-based): ${action.file_path}`;
+      secondaryText =
+        action.description || `${action.changes?.length || 0} line changes`;
+      showDiffViewer = true;
+      contentToDisplay = undefined;
       break;
-    case "EDIT_FILE":
-      icon = <EditIcon fontSize="small" />;
-      primaryText = `Edit: ${action.file_path}`;
-      secondaryText = action.description || "Legacy edit format";
-      showDiff = true;
+    case "EDIT_FILE_CONTEXTUAL":
+      icon = <CompareArrowsIcon fontSize="small" />;
+      primaryText = `Edit Contextual: ${action.file_path}`;
+      secondaryText =
+        action.description || `Contextual ${action.operation || "edit"}`;
+      showDiffViewer = true;
+      contentToDisplay = undefined;
+      break;
+    case "EDIT_FILE_CONTEXTUAL_BATCH":
+      icon = <PlaylistAddCheckIcon fontSize="small" />;
+      primaryText = `Batch Edit Contextual: ${action.file_path}`;
+      secondaryText =
+        action.description ||
+        `${action.changes?.length || 0} contextual changes`;
+      showDiffViewer = true;
+      contentToDisplay = undefined;
       break;
     case "CREATE_FILE":
       icon = <AddCircleOutlineIcon fontSize="small" />;
-      primaryText = `Create: ${action.file_path}`;
+      primaryText = `Create File: ${action.file_path}`;
       secondaryText =
-        action.description || (action.content ? "View content below" : "");
+        action.description ||
+        (action.content ? "View content below" : "Empty file");
+      showDiffViewer = true; // Diff against empty
+      contentToDisplay = undefined;
       break;
     case "CREATE_FOLDER":
       icon = <CreateNewFolderIcon fontSize="small" />;
@@ -297,13 +402,11 @@ const ActionItem: React.FC<{ action: AIAction; index: number }> = ({
     case "EXECUTE_SHELL_COMMAND":
       icon = <TerminalIcon fontSize="small" />;
       primaryText = `Execute: ${action.command}`;
-      secondaryText = action.description || "Shell command to execute";
       contentToDisplay = action.command;
       break;
     case "GENERAL_MESSAGE":
       icon = <MessageIcon fontSize="small" />;
       primaryText = action.message || "General Message";
-      secondaryText = action.description || "";
       contentToDisplay = action.message;
       break;
     default:
@@ -312,7 +415,7 @@ const ActionItem: React.FC<{ action: AIAction; index: number }> = ({
       contentToDisplay = JSON.stringify(action, null, 2);
   }
 
-  const canExpand = !!(contentToDisplay || showDiff);
+  const canExpand = !!(contentToDisplay || showDiffViewer);
 
   return (
     <ListItem
@@ -336,30 +439,47 @@ const ActionItem: React.FC<{ action: AIAction; index: number }> = ({
         display: "flex",
         flexDirection: "column",
         alignItems: "flex-start",
-        py: 1.25,
-        pr: canExpand ? 5 : 2,
+        py: 1,
+        pr: canExpand ? 5 : 1.5,
+        pl: 1.5,
       }}
     >
       <Box sx={{ display: "flex", alignItems: "center", width: "100%" }}>
-        <ListItemIcon sx={{ minWidth: 36, mr: 0.5 }}>{icon}</ListItemIcon>
+        <ListItemIcon sx={{ minWidth: 32, mr: 0.75 }}>{icon}</ListItemIcon>
         <ListItemText
           primary={
-            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <Box
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                gap: 0.5,
+                flexWrap: "wrap",
+              }}
+            >
               <Typography
                 variant="body1"
-                sx={{ fontWeight: 500, fontSize: "0.95rem" }}
+                sx={{
+                  fontWeight: 500,
+                  fontSize: "0.9rem",
+                  wordBreak: "break-all",
+                }}
               >
                 {primaryText}
               </Typography>
-              {action.type === "EDIT_FILE_PARTIAL" && action.changes && (
-                <Chip
-                  size="small"
-                  label={`${action.changes.length} changes`}
-                  color="primary"
-                  variant="outlined"
-                />
+              {(action.type === "EDIT_FILE_PARTIAL" ||
+                action.type === "EDIT_FILE_CONTEXTUAL_BATCH") &&
+                action.changes && (
+                  <Chip
+                    size="small"
+                    label={`${action.changes.length} changes`}
+                    color="primary"
+                    variant="outlined"
+                    sx={{ height: 18, fontSize: "0.7rem" }}
+                  />
+                )}
+              {showDiffViewer && (
+                <DifferenceIcon fontSize="small" color="action" />
               )}
-              {showDiff && <DifferenceIcon fontSize="small" color="action" />}
             </Box>
           }
           secondary={
@@ -367,7 +487,7 @@ const ActionItem: React.FC<{ action: AIAction; index: number }> = ({
               <Typography
                 variant="body2"
                 color="text.secondary"
-                sx={{ fontSize: "0.85rem" }}
+                sx={{ fontSize: "0.8rem", mt: 0.25 }}
               >
                 {secondaryText}
               </Typography>
@@ -383,39 +503,30 @@ const ActionItem: React.FC<{ action: AIAction; index: number }> = ({
           unmountOnExit
           sx={{
             width: "100%",
-            pl: "40px",
-            pt: open ? 1 : 0,
+            pl: "36px", // Align with ListItemText approximately
+            pt: open ? 0.5 : 0, // Reduced top padding when open
+            mt: 0.5,
           }}
         >
           <Box
             sx={{
-              p: 1.5,
+              p: 1, // Reduced padding inside content box
               bgcolor: (theme) =>
                 theme.palette.mode === "dark"
-                  ? "rgba(255,255,255,0.05)"
-                  : "rgba(0,0,0,0.03)",
+                  ? "rgba(255,255,255,0.04)"
+                  : "rgba(0,0,0,0.025)",
               borderRadius: 1,
-              maxHeight: 400,
+              maxHeight: 350, // Increased max height
               overflowY: "auto",
               border: "1px solid",
               borderColor: "divider",
             }}
           >
-            {showDiff ? (
+            {showDiffViewer ? (
               <DiffViewer
                 originalContent={originalContent}
-                newContent={
-                  action.type === "EDIT_FILE_COMPLETE" ||
-                  action.type === "EDIT_FILE"
-                    ? action.content
-                    : undefined
-                }
-                changes={
-                  action.type === "EDIT_FILE_PARTIAL"
-                    ? action.changes
-                    : undefined
-                }
-                filePath={action.file_path || "unknown"}
+                action={action}
+                isLoadingOriginal={isLoadingOriginal}
               />
             ) : (
               <Typography
@@ -425,8 +536,8 @@ const ActionItem: React.FC<{ action: AIAction; index: number }> = ({
                   whiteSpace: "pre-wrap",
                   wordBreak: "break-all",
                   fontFamily: "monospace",
-                  fontSize: "0.8rem",
-                  lineHeight: 1.6,
+                  fontSize: "0.75rem", // Slightly smaller for dense info
+                  lineHeight: 1.5,
                 }}
               >
                 {contentToDisplay}
@@ -439,7 +550,6 @@ const ActionItem: React.FC<{ action: AIAction; index: number }> = ({
   );
 };
 
-// Rest of AISuggestionsPanel component remains the same...
 const AISuggestionsPanel: React.FC<AISuggestionsPanelProps> = ({
   explanation,
   aiActions,
@@ -451,15 +561,20 @@ const AISuggestionsPanel: React.FC<AISuggestionsPanelProps> = ({
       action.type !== "GENERAL_MESSAGE" ||
       (action.type === "GENERAL_MESSAGE" &&
         action.message &&
-        action.message !== explanation)
+        action.message !== explanation) // Avoid showing explanation as an action if it's the same
   );
 
   if (actionableItems.length === 0 && !explanation) {
     return null;
   }
 
-  const hasActualActions = actionableItems.some(
-    (action) => action.type !== "GENERAL_MESSAGE"
+  const hasActualFileOperations = actionableItems.some(
+    (action) =>
+      action.type !== "GENERAL_MESSAGE" &&
+      action.type !== "EXECUTE_SHELL_COMMAND"
+  );
+  const hasShellCommands = actionableItems.some(
+    (action) => action.type === "EXECUTE_SHELL_COMMAND"
   );
 
   return (
@@ -472,24 +587,30 @@ const AISuggestionsPanel: React.FC<AISuggestionsPanelProps> = ({
         display: "flex",
         flexDirection: "column",
       }}
-      elevation={2}
+      elevation={1} // Reduced elevation for a flatter look
     >
       <CardContent
         sx={{
           pb: actionableItems.length > 0 ? 1 : 2,
           overflowY: "auto",
           flexGrow: 1,
+          p: 1.5, // Uniform padding
         }}
       >
-        <Typography variant="h6" component="h2" gutterBottom>
+        <Typography
+          variant="h6"
+          component="h2"
+          gutterBottom
+          sx={{ fontSize: "1.1rem", mb: 1 }}
+        >
           AI Suggestions
         </Typography>
         {explanation && (
           <Paper
             variant="outlined"
             sx={{
-              p: 1.5,
-              mb: actionableItems.length > 0 ? 2 : 0,
+              p: 1, // Reduced padding
+              mb: actionableItems.length > 0 ? 1.5 : 0,
               bgcolor: (theme) =>
                 theme.palette.mode === "dark"
                   ? "rgba(255,255,255,0.03)"
@@ -500,7 +621,7 @@ const AISuggestionsPanel: React.FC<AISuggestionsPanelProps> = ({
             <Typography
               variant="body2"
               color="text.secondary"
-              sx={{ fontStyle: "italic", whiteSpace: "pre-wrap" }}
+              sx={{ whiteSpace: "pre-wrap", fontSize: "0.85rem" }}
             >
               {explanation}
             </Typography>
@@ -510,11 +631,11 @@ const AISuggestionsPanel: React.FC<AISuggestionsPanelProps> = ({
           <List
             dense
             sx={{
-              bgcolor: "background.paper",
+              bgcolor: "transparent", // Let CardContent handle background
               p: 0,
               borderRadius: 1,
-              border: "1px solid",
-              borderColor: "divider",
+              // border: "1px solid", // Removed border, relies on Card border
+              // borderColor: "divider",
             }}
           >
             {actionableItems.map((action, index) => (
@@ -523,7 +644,7 @@ const AISuggestionsPanel: React.FC<AISuggestionsPanelProps> = ({
           </List>
         )}
       </CardContent>
-      {hasActualActions && (
+      {(hasActualFileOperations || hasShellCommands) && (
         <CardActions
           sx={{
             justifyContent: "flex-end",
@@ -536,11 +657,13 @@ const AISuggestionsPanel: React.FC<AISuggestionsPanelProps> = ({
           <Button
             variant="contained"
             color="primary"
-            onClick={() => onApplyActions()}
+            onClick={() => onApplyActions(actionableItems)} // Pass current actionableItems
             disabled={isLoading}
             aria-busy={isLoading}
+            size="small"
           >
-            Apply Changes
+            Apply {actionableItems.length} Suggestion
+            {actionableItems.length === 1 ? "" : "s"}
           </Button>
         </CardActions>
       )}
