@@ -463,7 +463,6 @@ class GeminiAgent:
             }
 
 
-# OpenAI and Anthropic classes remain the same as your original implementation
 class OpenAIAgent:
     def __init__(
         self, api_key: str, initial_model_name: str = DEFAULT_OPENAI_MODEL_NAME
@@ -478,6 +477,7 @@ class OpenAIAgent:
         try:
             if not self.api_key:
                 raise ValueError("OpenAI API key is missing.")
+            # openai>=1.x client
             self.client = openai.OpenAI(api_key=self.api_key)
             self._initialized_successfully = True
             logger.info(
@@ -489,7 +489,6 @@ class OpenAIAgent:
             )
             self._initialized_successfully = False
             self.client = None
-        ai = 0
 
     def set_model(self, new_model_name: str) -> bool:
         if new_model_name == self.current_model_name and self.is_ready():
@@ -523,17 +522,164 @@ class OpenAIAgent:
                 "explanation": f"OpenAI model ({self.current_model_name}) not initialized. Please check API key and configuration.",
                 "actions": [],
             }
+        # Build context similar to Anthropic implementation
+        context_parts = [f"User Request: {user_prompt}\n"]
 
-        logger.warning("OpenAI get_ai_response is not fully implemented yet.")
-        return {
-            "explanation": f"OpenAI integration for model {self.current_model_name} is a stub. Full response generation not implemented.",
-            "actions": [
-                {
-                    "type": "GENERAL_MESSAGE",
-                    "message": "OpenAI response generation is a stub.",
+        context_method = project_context.get("context_method", "Unknown")
+        context_parts.append(f"Context Method: {context_method}")
+
+        if "rag_metadata" in project_context:
+            rag_info = project_context["rag_metadata"]
+            context_parts.append(
+                f"RAG Info: {rag_info.get('total_chunks', 0)} relevant chunks, ~{rag_info.get('estimated_tokens', 0)} tokens"
+            )
+
+        context_parts.append("\nProject File Structure (relative paths):")
+        if project_context.get("file_paths"):
+            for p_path in project_context["file_paths"]:
+                context_parts.append(f"- {p_path}")
+        else:
+            context_parts.append("No files in project or project not loaded.")
+        context_parts.append("\n")
+
+        if (
+            project_context.get("current_file_path")
+            and project_context.get("current_file_content") is not None
+        ):
+            context_parts.append(
+                f"Currently Open File Relative Path: {project_context['current_file_path']}"
+            )
+            context_parts.append("Current Open File Content:")
+            context_parts.append("```")
+            context_parts.append(project_context["current_file_content"])
+            context_parts.append("```\n")
+        else:
+            context_parts.append("No file is currently open in the editor.\n")
+
+        if project_context.get("editing_recommendation"):
+            context_parts.append(
+                f"EDITING RECOMMENDATION: {project_context['editing_recommendation']}"
+            )
+
+        if project_context.get("large_files"):
+            context_parts.append(
+                f"LARGE FILES (consider EDIT_FILE_PARTIAL): {', '.join(project_context['large_files'])}"
+            )
+
+        if context_method == "RAG" or "RAG" in context_method:
+            context_parts.append(
+                "RELEVANT CODE CONTEXT (Selected via RAG - Most relevant to your query):"
+            )
+        else:
+            context_parts.append(
+                "All Project File Contents (relative_path -> content, content may be truncated):"
+            )
+
+        if project_context.get("all_file_contents"):
+            for rel_path, content_text in project_context["all_file_contents"].items():
+                context_parts.append(f"\n--- File: {rel_path} ---")
+                context_parts.append(content_text)
+                context_parts.append("--- End File ---")
+        else:
+            context_parts.append("No file contents available for the project.")
+
+        full_user_content = "\n".join(context_parts)
+
+        messages = []
+        for msg in chat_history:
+            role = "user" if msg["role"] == "user" else "assistant"
+            content = msg["content"]
+            if isinstance(content, dict):
+                content = json.dumps(content)
+            messages.append({"role": role, "content": content})
+
+        messages.append({"role": "user", "content": full_user_content})
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.current_model_name,
+                messages=[{"role": "system", "content": SYSTEM_PROMPT}, *messages],
+                max_tokens=8000,
+                temperature=0.7,
+            )
+
+            raw_response_text = response.choices[0].message.content.strip()
+
+            if raw_response_text.startswith("```json"):
+                raw_response_text = raw_response_text[7:]
+                if raw_response_text.endswith("```"):
+                    raw_response_text = raw_response_text[:-3]
+                raw_response_text = raw_response_text.strip()
+            elif raw_response_text.startswith("```") and raw_response_text.endswith("```"):
+                raw_response_text = raw_response_text[3:-3].strip()
+
+            try:
+                parsed_response = json.loads(raw_response_text)
+                if not isinstance(parsed_response, dict):
+                    return {
+                        "explanation": "AI response format error: Expected a JSON object.",
+                        "actions": [
+                            {"type": "GENERAL_MESSAGE", "message": raw_response_text}
+                        ],
+                    }
+
+                if (
+                    "explanation" not in parsed_response
+                    or "actions" not in parsed_response
+                ):
+                    return {
+                        "explanation": "AI response JSON structure error: Missing required fields.",
+                        "actions": [
+                            {"type": "GENERAL_MESSAGE", "message": raw_response_text}
+                        ],
+                    }
+
+                if not isinstance(parsed_response.get("actions"), list):
+                    parsed_response["actions"] = [
+                        {
+                            "type": "GENERAL_MESSAGE",
+                            "message": "AI 'actions' field was malformed (not a list).",
+                        }
+                    ]
+
+                return parsed_response
+
+            except json.JSONDecodeError:
+                logger.warning(
+                    f"AI response was not valid JSON. Raw response:\n{raw_response_text}"
+                )
+                return {
+                    "explanation": "AI response was not in the expected JSON format. Displaying raw response.",
+                    "actions": [
+                        {"type": "GENERAL_MESSAGE", "message": raw_response_text}
+                    ],
                 }
-            ],
-        }
+
+        except Exception as e:
+            logger.error(
+                f"Error communicating with OpenAI ({self.current_model_name}): {e}"
+            )
+            err_str = str(e).lower()
+            if "api" in err_str and "key" in err_str:
+                return {
+                    "explanation": "OpenAI API key is not valid. Please check and re-enter.",
+                    "actions": [],
+                }
+            elif "rate" in err_str and "limit" in err_str:
+                return {
+                    "explanation": "Rate limit exceeded. Please wait a moment and try again.",
+                    "actions": [],
+                }
+            elif "model" in err_str:
+                return {
+                    "explanation": f"Error with model '{self.current_model_name}'. It might not be available.",
+                    "actions": [],
+                }
+            else:
+                return {
+                    "explanation": f"Error communicating with OpenAI: {str(e)}",
+                    "actions": [],
+                }
 
 
 class AnthropicAgent:

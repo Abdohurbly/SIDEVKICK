@@ -5,5 +5,5 @@ watchdog
 streamlit
 google-generativeai
 requests
-opeanai
+openai
 anthropic
