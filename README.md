@@ -16,7 +16,7 @@ SIDEVKICK is a tool designed to assist developers by integrating AI capabilities
 
 ## ✨ Features
 
-- **AI-Powered Coding Assistance:** Leverage Google Gemini models for code generation, refactoring, explanation, and suggestions.
+- **AI-Powered Coding Assistance:** Leverage models from Google Gemini, OpenAI, or Anthropic for code generation, refactoring, explanation, and suggestions.
 - **Interactive Chat Interface:** Communicate with the AI to get help with your coding tasks.
 - **Integrated Code Editor:** View and edit your project files directly within the application using Monaco Editor.
 - **File Explorer:** Easily navigate your project's directory structure.
@@ -91,7 +91,7 @@ The agent supports two powerful methods to understand your codebase context:
   - Monaco Editor (for the code editor component)
   - Axios (for API communication)
 
-- **AI Model:** Google Gemini (configurable), Anthropic Claude, OpenAI (soon)
+- **AI Model:** Google Gemini (configurable), Anthropic Claude, OpenAI
 
 ## 🚀 Getting Started
 
@@ -100,7 +100,7 @@ The agent supports two powerful methods to understand your codebase context:
 - Python 3.9 or higher
 - Node.js 18.x or higher and npm (or yarn)
 - Git
-- A Google Gemini API Key (or an API key for your chosen AI provider if you adapt the agent)
+- An API key for Google Gemini, OpenAI, or Anthropic (depending on your chosen provider)
 
 ### Installation & Setup
 
