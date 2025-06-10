@@ -82,11 +82,11 @@ const GitControls: React.FC = () => {
 
   const fetchBranch = useCallback(
     () => runGitCommand(gitGetCurrentBranch, "branch"),
-    []
+    [runGitCommand]
   );
   const fetchStatus = useCallback(
     () => runGitCommand(getGitStatus, "status"),
-    []
+    [runGitCommand]
   );
 
   useEffect(() => {
