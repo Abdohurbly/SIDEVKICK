@@ -14,4 +14,8 @@ module.exports = {
     es2021: true,
     node: true,
   },
+  rules: {
+    'no-unused-vars': 'off',
+    'no-useless-escape': 'off',
+  },
 };
