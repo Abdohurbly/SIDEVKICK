@@ -223,7 +223,13 @@ Contributions are welcome! We appreciate any help to improve the SIDEVKICK. Here
      npm run lint
      ```
 
-   - (Add backend linting/testing instructions if set up, e.g., using Black, Flake8, Pytest).
+    - For backend changes, run the Python unit tests:
+
+      ```bash
+      # install dependencies if you haven't
+      pip install -r requirements.txt
+      pytest
+      ```
 
 5. **Commit Your Changes:**
 
