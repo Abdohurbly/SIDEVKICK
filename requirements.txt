@@ -7,3 +7,4 @@ google-generativeai
 requests
 openai
 anthropic
+pytest

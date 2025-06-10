@@ -33,61 +33,86 @@ const GitControls: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<string | null>(null); // string to identify which button is loading
 
-  const handleResponse = (operation: string, res: GitCommandResponse) => {
-    let message = `Command: ${res.command}\nReturn Code: ${res.returncode}\n`;
-    if (res.stdout) message += `Stdout:\n${res.stdout}\n`;
-    if (res.stderr) message += `Stderr:\n${res.stderr}\n`;
-    setOutput(message.trim());
-
-    if (res.returncode !== 0) {
-      let errorMessage = `Error during ${operation}: ${res.stderr || "Unknown error"}`;
-      if (res.returncode === -1 && res.stderr && res.stderr.toLowerCase().includes("git command not found")) {
-        errorMessage = "Error: Git command not found. Is Git installed and in your system's PATH?";
-      }
-      setError(errorMessage);
-    } else {
+  const runGitCommand = useCallback(
+    async (
+      commandFn: () => Promise<GitCommandResponse>,
+      operation: string
+    ) => {
+      setIsLoading(operation);
       setError(null);
-      if (operation === "commit") setCommitMessage("");
-      // Refresh status and branch after successful operations that change state
-      if (["add", "commit", "push", "pull"].includes(operation)) {
-        fetchBranch();
-        fetchStatus();
-      }
-    }
-  };
+      setOutput(null);
+      try {
+        const res = await commandFn();
+        let message = `Command: ${res.command}\nReturn Code: ${res.returncode}\n`;
+        if (res.stdout) message += `Stdout:\n${res.stdout}\n`;
+        if (res.stderr) message += `Stderr:\n${res.stderr}\n`;
+        setOutput(message.trim());
 
-  const runGitCommand = async (
-    commandFn: () => Promise<GitCommandResponse>,
-    operation: string
-  ) => {
-    setIsLoading(operation);
-    setError(null);
-    setOutput(null);
-    try {
-      const res = await commandFn();
-      handleResponse(operation, res);
-      if (operation === "branch" && res.stdout && res.returncode === 0)
-        setBranch(res.stdout);
-      if (operation === "status" && res.returncode === 0) {
-        setStatus(res.stdout || "No changes detected or repository is clean.");
-      } else if (operation === "status" && res.returncode !== 0) {
-        setStatus(res.stderr || "Failed to get status");
+        if (res.returncode !== 0) {
+          let errorMessage = `Error during ${operation}: ${res.stderr || "Unknown error"}`;
+          if (
+            res.returncode === -1 &&
+            res.stderr &&
+            res.stderr.toLowerCase().includes("git command not found")
+          ) {
+            errorMessage =
+              "Error: Git command not found. Is Git installed and in your system's PATH?";
+          }
+          setError(errorMessage);
+        } else {
+          setError(null);
+          if (operation === "commit") setCommitMessage("");
+        }
+
+        if (operation === "branch" && res.stdout && res.returncode === 0) {
+          setBranch(res.stdout);
+        }
+        if (operation === "status" && res.returncode === 0) {
+          setStatus(res.stdout || "No changes detected or repository is clean.");
+        } else if (operation === "status" && res.returncode !== 0) {
+          setStatus(res.stderr || "Failed to get status");
+        }
+      } catch (err: any) {
+        setError(`Failed to execute ${operation}: ${err.message}`);
+        setOutput(`Error: ${err.message}`);
       }
-    } catch (err: any) {
-      setError(`Failed to execute ${operation}: ${err.message}`);
-      setOutput(`Error: ${err.message}`);
-    }
-    setIsLoading(null);
-  };
+      setIsLoading(null);
+    },
+    []
+  );
 
   const fetchBranch = useCallback(
     () => runGitCommand(gitGetCurrentBranch, "branch"),
-    []
+    [runGitCommand]
   );
   const fetchStatus = useCallback(
     () => runGitCommand(getGitStatus, "status"),
-    []
+    [runGitCommand]
   );
+
+  const handleAdd = useCallback(async () => {
+    await runGitCommand(gitAddAll, "add");
+    fetchBranch();
+    fetchStatus();
+  }, [runGitCommand, fetchBranch, fetchStatus]);
+
+  const handlePull = useCallback(async () => {
+    await runGitCommand(gitPull, "pull");
+    fetchBranch();
+    fetchStatus();
+  }, [runGitCommand, fetchBranch, fetchStatus]);
+
+  const handleCommit = useCallback(async () => {
+    await runGitCommand(() => gitCommit(commitMessage), "commit");
+    fetchBranch();
+    fetchStatus();
+  }, [runGitCommand, fetchBranch, fetchStatus, commitMessage]);
+
+  const handlePush = useCallback(async () => {
+    await runGitCommand(gitPush, "push");
+    fetchBranch();
+    fetchStatus();
+  }, [runGitCommand, fetchBranch, fetchStatus]);
 
   useEffect(() => {
     fetchBranch();
@@ -120,7 +145,7 @@ const GitControls: React.FC = () => {
         <Button
           variant="outlined"
           size="small"
-          onClick={() => runGitCommand(gitAddAll, "add")}
+          onClick={handleAdd}
           disabled={!!isLoading}
           startIcon={<AddIcon />}
         >
@@ -129,7 +154,7 @@ const GitControls: React.FC = () => {
         <Button
           variant="outlined"
           size="small"
-          onClick={() => runGitCommand(gitPull, "pull")}
+          onClick={handlePull}
           disabled={!!isLoading}
           startIcon={<CloudDownloadIcon />}
         >
@@ -171,9 +196,7 @@ const GitControls: React.FC = () => {
         <Button
           variant="contained"
           color="primary"
-          onClick={() =>
-            runGitCommand(() => gitCommit(commitMessage), "commit")
-          }
+          onClick={handleCommit}
           disabled={!!isLoading || !commitMessage.trim()}
           startIcon={<CommitIcon />}
         >
@@ -186,7 +209,7 @@ const GitControls: React.FC = () => {
         <Button
           variant="contained"
           color="secondary"
-          onClick={() => runGitCommand(gitPush, "push")}
+          onClick={handlePush}
           disabled={!!isLoading}
           startIcon={<PushPinIcon />}
         >

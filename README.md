@@ -220,10 +220,20 @@ Contributions are welcome! We appreciate any help to improve the SIDEVKICK. Here
 
      ```bash
      cd frontend
+     npm ci  # install Node dependencies
      npm run lint
      ```
 
-   - (Add backend linting/testing instructions if set up, e.g., using Black, Flake8, Pytest).
+    - For backend changes, run the Python unit tests:
+
+      ```bash
+      # install dependencies if you haven't
+      pip install -r requirements.txt
+      pytest
+      ```
+
+      The tests include dummy modules for large optional dependencies so they can
+      run in minimal environments.
 
 5. **Commit Your Changes:**
 
