@@ -231,6 +231,9 @@ Contributions are welcome! We appreciate any help to improve the SIDEVKICK. Here
       pytest
       ```
 
+      The tests include dummy modules for large optional dependencies so they can
+      run in minimal environments.
+
 5. **Commit Your Changes:**
 
    ```bash
