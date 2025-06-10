@@ -220,6 +220,7 @@ Contributions are welcome! We appreciate any help to improve the SIDEVKICK. Here
 
      ```bash
      cd frontend
+     npm ci  # install Node dependencies
      npm run lint
      ```
 
