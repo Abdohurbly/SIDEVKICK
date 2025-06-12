@@ -1,7 +1,6 @@
 import axios, { AxiosError } from 'axios';
 import {
   API_BASE_URL,
-  AIProvider,
   AIModelId,
   ApiKeyConfigRequest,
   ApiKeyConfigResponse,
