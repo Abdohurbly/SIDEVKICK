@@ -7,6 +7,7 @@ from pathlib import Path
 import logging
 from diff_utils import DiffProcessor, ContextualDiffProcessor
 
+from collections import defaultdict
 from agent import (
     GeminiAgent,
     OpenAIAgent,
@@ -440,410 +441,230 @@ async def apply_ai_actions(request: ApplyActionsRequest):
 
     project_root_abs_path = Path(current_project_path)
     results = []
-    # Ensure CREATE_FOLDER actions happen first
-    sorted_actions = sorted(
+    
+    # Initial sort primarily for CREATE_FOLDER, other types will be regrouped.
+    # EXECUTE_SHELL_COMMAND will be deferred.
+    sorted_actions_initial = sorted(
         request.actions,
-        key=lambda x: 0 if x.type == "CREATE_FOLDER" else 1,
+        key=lambda x: 0 if x.type == "CREATE_FOLDER" else (2 if x.type == "EXECUTE_SHELL_COMMAND" else 1),
     )
 
-    for action_item_model in sorted_actions:
-        # Convert Pydantic model to dict, excluding None values for cleaner logs and processing
-        action_item = action_item_model.model_dump(exclude_none=True)
-        action_type = action_item.get(
-            "type"
-        )  # Use .get for safety, though type is required by Pydantic
+    from collections import defaultdict
+    file_actions_grouped = defaultdict(list)
+    folder_actions = []
+    shell_commands = []
+    
+    for action_model in sorted_actions_initial:
+        action_item = action_model.model_dump(exclude_none=True)
+        action_type = action_item.get("type")
 
+        if action_type in ["EDIT_FILE_COMPLETE", "EDIT_FILE", "EDIT_FILE_PARTIAL", "CREATE_FILE", "EDIT_FILE_CONTEXTUAL", "EDIT_FILE_CONTEXTUAL_BATCH"]:
+            file_path = action_item.get("file_path")
+            if not file_path: # file_path is essential for these operations
+                results.append({
+                    "type": action_type, "path_info": "N/A", "status": "error",
+                    "detail": f"{action_type} action missing 'file_path'"
+                })
+                continue
+            # Ensure path is relative and safe (basic check, more robust checks can be added)
+            if Path(file_path).is_absolute():
+                 results.append({
+                    "type": action_type, "path_info": file_path, "status": "error",
+                    "detail": f"File path for {action_type} must be relative: {file_path}"
+                })
+                 continue
+            file_actions_grouped[file_path].append(action_item)
+        elif action_type == "CREATE_FOLDER":
+            folder_actions.append(action_item)
+        elif action_type == "EXECUTE_SHELL_COMMAND":
+            shell_commands.append(action_item)
+        elif action_type == "GENERAL_MESSAGE":
+            results.append({
+                "type": action_type, "status": "skipped",
+                "message": action_item.get("message", "No message."),
+                "detail": action_item.get("description", "General informational message.")
+            })
+        else:
+            results.append({
+                "type": action_type or "UnknownType", "status": "skipped",
+                "detail": f"Unknown or unsupported action type: {action_type}"
+            })
+
+    # 1. Process CREATE_FOLDER actions first
+    for action_item in folder_actions:
+        action_type = "CREATE_FOLDER" # Known at this point
+        folder_path = action_item.get("folder_path")
         try:
-            if not action_type:  # Should be caught by Pydantic, but as a safeguard
-                raise ValueError("Action item is missing 'type' field.")
-
-            if action_type == "CREATE_FOLDER":
-                folder_path = action_item.get("folder_path")
-                if not folder_path:
-                    raise ValueError("folder_path missing for CREATE_FOLDER")
-                folder_to_create_abs = (project_root_abs_path / folder_path).resolve()
-                # Ensure it's within project path (basic safety)
-                if (
-                    project_root_abs_path not in folder_to_create_abs.parents
-                    and folder_to_create_abs != project_root_abs_path
-                ):
-                    raise ValueError(
-                        f"Attempt to create folder outside project: {folder_path}"
-                    )
-                if not utils.create_folder_if_not_exists(str(folder_to_create_abs)):
-                    raise Exception(f"Failed to create folder: {folder_path}")
-                results.append(
-                    {
-                        "type": action_type,
-                        "path_info": folder_path,
-                        "status": "success",
-                        "detail": action_item.get("description"),
-                    }
-                )
-
-            elif action_type == "EDIT_FILE_COMPLETE" or action_type == "EDIT_FILE":
-                file_path = action_item.get("file_path")
-                content = action_item.get("content")  # content can be an empty string
-                if not file_path or content is None:
-                    raise ValueError(
-                        "file_path or content missing for EDIT_FILE_COMPLETE"
-                    )
-                file_to_edit_abs = (project_root_abs_path / file_path).resolve()
-                if (
-                    project_root_abs_path not in file_to_edit_abs.parents
-                    and file_to_edit_abs != project_root_abs_path
-                ):
-                    raise ValueError(
-                        f"Attempt to edit file outside project: {file_path}"
-                    )
-                if not utils.write_file_content(
-                    str(file_to_edit_abs), content
-                ):  # write_file_content creates parent dirs
-                    raise Exception(
-                        f"Failed to write complete content to file: {file_path}"
-                    )
-                results.append(
-                    {
-                        "type": action_type,
-                        "path_info": file_path,
-                        "status": "success",
-                        "detail": action_item.get("description"),
-                    }
-                )
-
-            elif action_type == "EDIT_FILE_PARTIAL":  # Legacy line-based
-                file_path = action_item.get("file_path")
-                changes = action_item.get("changes", [])
-                if not file_path or not changes:
-                    raise ValueError(
-                        "file_path or changes missing for EDIT_FILE_PARTIAL"
-                    )
-                file_to_edit_abs = (project_root_abs_path / file_path).resolve()
-                if not file_to_edit_abs.exists():
-                    raise FileNotFoundError(
-                        f"File does not exist for EDIT_FILE_PARTIAL: {file_path}"
-                    )
-
-                original_content = file_to_edit_abs.read_text(
-                    encoding="utf-8", errors="ignore"
-                )
-                valid, error_msg = DiffProcessor.validate_changes(
-                    original_content, changes
-                )
-                if not valid:
-                    raise ValueError(
-                        f"Invalid partial changes for {file_path}: {error_msg}"
-                    )
-
-                modified_content = DiffProcessor.apply_partial_changes(
-                    original_content, changes
-                )
-                if not utils.write_file_content(
-                    str(file_to_edit_abs), modified_content
-                ):
-                    raise Exception(
-                        f"Failed to write partial changes to file: {file_path}"
-                    )
-                results.append(
-                    {
-                        "type": action_type,
-                        "path_info": file_path,
-                        "status": "success",
-                        "detail": action_item.get("description"),
-                        "changes_applied": len(changes),
-                    }
-                )
-
-            elif action_type == "CREATE_FILE":
-                file_path = action_item.get("file_path")
-                content = action_item.get("content")
-                if not file_path or content is None:
-                    raise ValueError("file_path or content missing for CREATE_FILE")
-                file_to_create_abs = (project_root_abs_path / file_path).resolve()
-                if (
-                    project_root_abs_path not in file_to_create_abs.parents
-                    and file_to_create_abs != project_root_abs_path
-                ):
-                    raise ValueError(
-                        f"Attempt to create file outside project: {file_path}"
-                    )
-                if not utils.create_folder_if_not_exists(
-                    str(file_to_create_abs.parent)
-                ):  # Ensure parent dir
-                    raise Exception(
-                        f"Failed to create parent directory for: {file_path}"
-                    )
-                if not utils.write_file_content(str(file_to_create_abs), content):
-                    raise Exception(f"Failed to create file: {file_path}")
-                results.append(
-                    {
-                        "type": action_type,
-                        "path_info": file_path,
-                        "status": "success",
-                        "detail": action_item.get("description"),
-                    }
-                )
-
-            elif action_type == "EDIT_FILE_CONTEXTUAL":
-                file_path = action_item.get("file_path")
-                if not file_path:
-                    raise ValueError("file_path is required for EDIT_FILE_CONTEXTUAL")
-
-                file_to_edit_abs = (project_root_abs_path / file_path).resolve()
-                if not file_to_edit_abs.exists():
-                    raise FileNotFoundError(
-                        f"File does not exist for EDIT_FILE_CONTEXTUAL: {file_path}"
-                    )
-
-                original_content = file_to_edit_abs.read_text(
-                    encoding="utf-8", errors="ignore"
-                )
-                logger.info(f"Processing EDIT_FILE_CONTEXTUAL for {file_path}")
-
-                operation = action_item.get("operation")
-                if not operation:
-                    logger.warning(
-                        f"Missing 'operation' field in EDIT_FILE_CONTEXTUAL for {file_path}. Attempting to infer."
-                    )
-                    # Inference logic starts here
-                    has_target = bool(action_item.get("target_content"))
-                    has_replacement = (
-                        "replacement_content" in action_item
-                    )  # Replacement can be empty string
-                    has_anchor = bool(action_item.get("anchor_content"))
-                    has_content_for_insert = (
-                        "content" in action_item
-                    )  # Inserted content can be empty string
-
-                    if has_target and has_replacement:
-                        operation = "replace"
-                        logger.info(f"Inferred 'replace' for {file_path}")
-                    elif has_anchor and has_content_for_insert:
-                        # Default to insert_before if ambiguous. AI should be specific.
-                        operation = "insert_before"
-                        logger.info(
-                            f"Inferred 'insert_before' (anchor provided) for {file_path}"
-                        )
-                    elif has_target:  # Only non-empty target_content provided
-                        operation = "delete"
-                        logger.info(
-                            f"Inferred 'delete' (only target provided) for {file_path}"
-                        )
-                    elif has_content_for_insert and not has_target and not has_anchor:
-                        logger.warning(
-                            f"Content-only contextual edit attempt for {file_path}. This is ambiguous."
-                        )
-                        current_ai_content = action_item.get("content", "")
-                        if (
-                            file_path.endswith(".go")
-                            and "\\tcase " in current_ai_content
-                        ):
-                            operation = "insert_before"
-                            # Try to find a sensible anchor for Go switch
-                            if "\\tdefault:" in original_content:
-                                action_item["anchor_content"] = "\\tdefault:"
-                            else:
-                                action_item["anchor_content"] = (
-                                    "\\t}"  # Fallback closing brace
-                                )
-                            logger.info(
-                                f"Go-specific heuristic: Inferred 'insert_before' for switch case. Anchor: '{action_item['anchor_content']}'."
-                            )
-                        else:
-                            logger.error(
-                                f"Cannot infer operation for ambiguous content-only edit in {file_path}."
-                            )
-                            raise ValueError(
-                                "Ambiguous content-only edit. AI must provide 'operation' and 'anchor_content' for inserts, or 'target_content'."
-                            )
-                    else:
-                        logger.error(
-                            f"Cannot infer operation for {file_path}. Fields: {list(action_item.keys())}"
-                        )
-                        raise ValueError(
-                            "Cannot infer 'operation'. Ensure 'operation' and its required fields (non-empty target/anchor) are provided by AI."
-                        )
-
-                    action_item["operation"] = (
-                        operation  # Store inferred operation back into action_item
-                    )
-
-                # Prepare the single change for the processor
-                contextual_change = {
-                    "operation": action_item.get(
-                        "operation"
-                    ),  # Now guaranteed to have an operation
-                    "target_content": action_item.get("target_content"),
-                    "replacement_content": action_item.get("replacement_content"),
-                    "anchor_content": action_item.get(
-                        "anchor_content"
-                    ),  # Might have been set by inference
-                    "content": action_item.get("content"),
-                    "before_context": action_item.get("before_context"),
-                    "after_context": action_item.get("after_context"),
-                    "description": action_item.get(
-                        "description", "Single contextual edit"
-                    ),
-                }
-
-                valid, error_msg = ContextualDiffProcessor.validate_contextual_changes(
-                    original_content, [contextual_change]
-                )
-                if not valid:
-                    raise ValueError(
-                        f"Invalid contextual change for {file_path}: {error_msg}"
-                    )
-
-                modified_content = ContextualDiffProcessor.apply_contextual_changes(
-                    original_content, [contextual_change]
-                )
-
-                if not utils.write_file_content(
-                    str(file_to_edit_abs), modified_content
-                ):
-                    raise Exception(
-                        f"Failed to write contextual changes to file: {file_path}"
-                    )
-                results.append(
-                    {
-                        "type": action_type,
-                        "path_info": file_path,
-                        "status": "success",
-                        "operation": action_item.get("operation"),
-                        "detail": action_item.get("description"),
-                    }
-                )
-
-            elif action_type == "EDIT_FILE_CONTEXTUAL_BATCH":
-                file_path = action_item.get("file_path")
-                contextual_changes_list = action_item.get("changes", [])
-                if not file_path or not contextual_changes_list:
-                    raise ValueError(
-                        "file_path and changes are required for EDIT_FILE_CONTEXTUAL_BATCH"
-                    )
-
-                file_to_edit_abs = (project_root_abs_path / file_path).resolve()
-                if not file_to_edit_abs.exists():
-                    raise FileNotFoundError(
-                        f"File does not exist for BATCH edit: {file_path}"
-                    )
-
-                original_content = file_to_edit_abs.read_text(
-                    encoding="utf-8", errors="ignore"
-                )
-                logger.info(
-                    f"Processing BATCH for {file_path} with {len(contextual_changes_list)} changes."
-                )
-
-                for idx, chg_item in enumerate(contextual_changes_list):
-                    if not chg_item.get("operation"):
-                        # Basic check. Complex inference per item in batch is out of scope here.
-                        # AI must provide 'operation' for each change in a batch.
-                        raise ValueError(
-                            f"Change {idx+1} in batch for {file_path} is missing 'operation'."
-                        )
-                    if (
-                        "description" not in chg_item
-                    ):  # Ensure description for logging in processor
-                        chg_item["description"] = (
-                            f"Batch item {idx+1}: {chg_item.get('operation')}"
-                        )
-
-                valid, error_msg = ContextualDiffProcessor.validate_contextual_changes(
-                    original_content, contextual_changes_list
-                )
-                if not valid:
-                    raise ValueError(
-                        f"Invalid contextual batch changes for {file_path}: {error_msg}"
-                    )
-
-                modified_content = ContextualDiffProcessor.apply_contextual_changes(
-                    original_content, contextual_changes_list
-                )
-                if not utils.write_file_content(
-                    str(file_to_edit_abs), modified_content
-                ):
-                    raise Exception(
-                        f"Failed to write contextual batch changes to file: {file_path}"
-                    )
-                results.append(
-                    {
-                        "type": action_type,
-                        "path_info": file_path,
-                        "status": "success",
-                        "detail": action_item.get("description"),
-                        "changes_applied": len(contextual_changes_list),
-                    }
-                )
-
-            elif action_type == "EXECUTE_SHELL_COMMAND":
-                command = action_item.get("command")
-                if not command:
-                    raise ValueError("command missing for EXECUTE_SHELL_COMMAND")
-                process = subprocess.run(
-                    command,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    cwd=current_project_path,
-                    check=False,
-                    universal_newlines=True,
-                )
-                cmd_output = CommandOutput(
-                    command=command,
-                    stdout=process.stdout.strip() if process.stdout else None,
-                    stderr=process.stderr.strip() if process.stderr else None,
-                    returncode=process.returncode,
-                )
-                status = "success" if process.returncode == 0 else "error"
-                results.append(
-                    {
-                        "type": action_type,
-                        "command": command,
-                        "status": status,
-                        "output": cmd_output.model_dump(),
-                        "detail": action_item.get("description"),
-                    }
-                )
-
-            elif action_type == "GENERAL_MESSAGE":
-                results.append(
-                    {
-                        "type": action_type,
-                        "status": "skipped",
-                        "message": action_item.get("message", "No message."),
-                        "detail": action_item.get(
-                            "description", "General informational message."
-                        ),
-                    }
-                )
-            else:
-                results.append(
-                    {
-                        "type": action_type,
-                        "status": "skipped",
-                        "detail": f"Unknown or unsupported action type: {action_type}",
-                    }
-                )
+            if not folder_path:
+                raise ValueError("folder_path missing for CREATE_FOLDER")
+            folder_to_create_abs = (project_root_abs_path / folder_path).resolve()
+            if not str(folder_to_create_abs).startswith(str(project_root_abs_path)):
+                raise ValueError(f"Attempt to create folder outside project: {folder_path}")
+            
+            if not utils.create_folder_if_not_exists(str(folder_to_create_abs)):
+                raise Exception(f"Failed to create folder: {folder_path}")
+            results.append({
+                "type": action_type, "path_info": folder_path, "status": "success",
+                "detail": action_item.get("description")
+            })
         except Exception as e:
-            logger.error(
-                f"Error applying action {action_item.get('type', 'UnknownType')}: {e}",
-                exc_info=True,
+            logger.error(f"Error creating folder {folder_path}: {e}", exc_info=True)
+            results.append({
+                "type": action_type, "path_info": folder_path or "N/A", "status": "error",
+                "detail": str(e)
+            })
+
+    # 2. Process file-modifying actions (grouped by file)
+    for file_path, actions_on_this_file in file_actions_grouped.items():
+        current_file_content_str: Optional[str] = None
+        file_to_work_on_abs = (project_root_abs_path / file_path).resolve()
+        
+        # Initial content load or setup for new file
+        is_create_action_present = any(a['type'] == 'CREATE_FILE' for a in actions_on_this_file)
+        
+        if file_to_work_on_abs.exists():
+            try:
+                current_file_content_str = file_to_work_on_abs.read_text(encoding="utf-8", errors="ignore")
+            except Exception as e_read:
+                logger.error(f"Error reading existing file {file_path} for modification: {e_read}", exc_info=True)
+                results.append({
+                    "type": "FILE_OPERATION_ERROR", "path_info": file_path, "status": "error",
+                    "detail": f"Failed to read existing file for modification: {str(e_read)}"
+                })
+                continue # Skip this entire file group
+        elif is_create_action_present or any(a['type'] == 'EDIT_FILE_COMPLETE' for a in actions_on_this_file):
+            current_file_content_str = "" # File will be created or fully overwritten
+        else: # File doesn't exist and no CREATE or EDIT_FILE_COMPLETE action
+            logger.error(f"File {file_path} does not exist and no CREATE_FILE/EDIT_FILE_COMPLETE action found.")
+            results.append({
+                "type": "FILE_OPERATION_ERROR", "path_info": file_path, "status": "error",
+                "detail": f"File '{file_path}' does not exist and actions require an existing file (e.g., contextual/partial edit)."
+            })
+            continue # Skip this file group
+
+        modified_in_memory_content = current_file_content_str
+        file_operation_failed_for_this_file = False
+
+        for action_item in actions_on_this_file:
+            action_type = action_item.get("type")
+            action_description = action_item.get("description", f"{action_type} on {file_path}")
+            try:
+                if not str(file_to_work_on_abs).startswith(str(project_root_abs_path)):
+                     raise ValueError(f"Security: Attempt to access file outside project root: {file_path}")
+
+                if action_type == "CREATE_FILE":
+                    content_to_create = action_item.get("content")
+                    if content_to_create is None: raise ValueError("'content' missing for CREATE_FILE")
+                    modified_in_memory_content = content_to_create
+                    results.append({"type": action_type, "path_info": file_path, "status": "success", "detail": action_description})
+
+                elif action_type == "EDIT_FILE_COMPLETE" or action_type == "EDIT_FILE":
+                    content_to_set = action_item.get("content")
+                    if content_to_set is None: raise ValueError("'content' missing for EDIT_FILE_COMPLETE/EDIT_FILE")
+                    modified_in_memory_content = content_to_set
+                    results.append({"type": action_type, "path_info": file_path, "status": "success", "detail": action_description})
+
+                elif action_type == "EDIT_FILE_PARTIAL": # Legacy line-based
+                    changes = action_item.get("changes", [])
+                    if not changes: raise ValueError("'changes' missing for EDIT_FILE_PARTIAL")
+                    valid, err_msg = DiffProcessor.validate_changes(modified_in_memory_content, changes)
+                    if not valid: raise ValueError(f"Invalid partial changes: {err_msg}")
+                    modified_in_memory_content = DiffProcessor.apply_partial_changes(modified_in_memory_content, changes)
+                    results.append({"type": action_type, "path_info": file_path, "status": "success", "detail": action_description, "changes_applied": len(changes)})
+                
+                elif action_type == "EDIT_FILE_CONTEXTUAL":
+                    operation = action_item.get("operation")
+                    if not operation: # Try to infer
+                        logger.warning(f"Missing 'operation' in EDIT_FILE_CONTEXTUAL for {file_path}. Attempting inference.")
+                        has_target = bool(action_item.get("target_content"))
+                        has_replacement = "replacement_content" in action_item
+                        has_anchor = bool(action_item.get("anchor_content"))
+                        has_content_for_insert = "content" in action_item
+                        if has_target and has_replacement: operation = "replace"
+                        elif has_anchor and has_content_for_insert: operation = "insert_before" # Default, AI should be specific
+                        elif has_target: operation = "delete"
+                        else: raise ValueError("Cannot infer 'operation' for EDIT_FILE_CONTEXTUAL. Provide target/anchor and content as needed.")
+                        action_item["operation"] = operation # Store inferred op
+                        logger.info(f"Inferred operation: {operation} for {file_path}")
+                    
+                    contextual_change_op = {
+                        "operation": operation,
+                        "target_content": action_item.get("target_content"),
+                        "replacement_content": action_item.get("replacement_content"),
+                        "anchor_content": action_item.get("anchor_content"),
+                        "content": action_item.get("content"),
+                        "before_context": action_item.get("before_context"),
+                        "after_context": action_item.get("after_context"),
+                        "description": action_item.get("description", f"Contextual {operation}"),
+                    }
+                    valid, err_msg = ContextualDiffProcessor.validate_contextual_changes(modified_in_memory_content, [contextual_change_op])
+                    if not valid: raise ValueError(f"Invalid contextual change: {err_msg}")
+                    modified_in_memory_content = ContextualDiffProcessor.apply_contextual_changes(modified_in_memory_content, [contextual_change_op])
+                    results.append({"type": action_type, "path_info": file_path, "status": "success", "operation": operation, "detail": action_description})
+
+                elif action_type == "EDIT_FILE_CONTEXTUAL_BATCH":
+                    batch_changes = action_item.get("changes", [])
+                    if not batch_changes: raise ValueError("'changes' list missing or empty for EDIT_FILE_CONTEXTUAL_BATCH")
+                    for idx, chg in enumerate(batch_changes):
+                        if not chg.get("operation"): raise ValueError(f"Change {idx+1} in batch for {file_path} missing 'operation'")
+                        if "description" not in chg: chg["description"] = f"Batch item {idx+1}: {chg.get('operation')}"
+                    
+                    valid, err_msg = ContextualDiffProcessor.validate_contextual_changes(modified_in_memory_content, batch_changes)
+                    if not valid: raise ValueError(f"Invalid contextual batch changes: {err_msg}")
+                    modified_in_memory_content = ContextualDiffProcessor.apply_contextual_changes(modified_in_memory_content, batch_changes)
+                    results.append({"type": action_type, "path_info": file_path, "status": "success", "detail": action_description, "changes_applied": len(batch_changes)})
+                
+            except Exception as e_action:
+                logger.error(f"Error applying {action_type} to {file_path}: {e_action}", exc_info=True)
+                results.append({"type": action_type, "path_info": file_path, "status": "error", "detail": str(e_action)})
+                file_operation_failed_for_this_file = True
+                break # Stop processing this file's actions
+
+        if not file_operation_failed_for_this_file:
+            try:
+                if not file_to_work_on_abs.parent.exists(): # Ensure parent dir exists, e.g., for new files
+                    utils.create_folder_if_not_exists(str(file_to_work_on_abs.parent))
+                
+                if utils.write_file_content(str(file_to_work_on_abs), modified_in_memory_content):
+                    logger.info(f"Successfully wrote all changes to {file_path}")
+                else:
+                    # This specific result append might be redundant if write_file_content itself logs/raises for results
+                    results.append({"type": "FILE_WRITE_ERROR", "path_info": file_path, "status": "error", "detail": f"Failed to write final content to disk for {file_path}."})
+            except Exception as e_write_final:
+                logger.error(f"Error writing final content for {file_path}: {e_write_final}", exc_info=True)
+                results.append({"type": "FILE_WRITE_ERROR", "path_info": file_path, "status": "error", "detail": str(e_write_final)})
+    
+    # 3. Process EXECUTE_SHELL_COMMAND actions last
+    for action_item in shell_commands:
+        action_type = "EXECUTE_SHELL_COMMAND" # Known
+        command = action_item.get("command")
+        try:
+            if not command:
+                raise ValueError("command missing for EXECUTE_SHELL_COMMAND")
+            
+            logger.info(f"Executing shell command: {command} in {current_project_path}")
+            process = subprocess.run(
+                command, shell=True, capture_output=True, text=True,
+                cwd=current_project_path, check=False, universal_newlines=True
             )
-            path_info = (
-                action_item.get("file_path")
-                or action_item.get("folder_path")
-                or action_item.get("command")
-                or "N/A"
+            cmd_output = CommandOutput(
+                command=command,
+                stdout=process.stdout.strip() if process.stdout else None,
+                stderr=process.stderr.strip() if process.stderr else None,
+                returncode=process.returncode,
             )
-            results.append(
-                {
-                    "type": action_item.get("type", "UnknownTypeOnError"),
-                    "path_info": path_info,
-                    "status": "error",
-                    "detail": str(e),
-                }
-            )
+            status = "success" if process.returncode == 0 else "error"
+            results.append({
+                "type": action_type, "command": command, "status": status,
+                "output": cmd_output.model_dump(), "detail": action_item.get("description")
+            })
+        except Exception as e_shell:
+            logger.error(f"Error executing shell command '{command}': {e_shell}", exc_info=True)
+            results.append({
+                "type": action_type, "command": command or "N/A", "status": "error",
+                "detail": str(e_shell)
+            })
+
     return {"results": results}
 
 
